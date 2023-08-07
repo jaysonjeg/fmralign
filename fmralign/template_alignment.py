@@ -8,7 +8,7 @@ prediction of new subjects unseen images
 import numpy as np
 from joblib import Memory, Parallel, delayed
 from sklearn.base import BaseEstimator, TransformerMixin
-from fmralignbench.surf_pairwise_alignment import SurfacePairwiseAlignment
+from fmralign.surf_pairwise_alignment import SurfacePairwiseAlignment
 
 def _rescaled_euclidean_mean(imgs, scale_average=False):
     """Make the Euclidian average of images
