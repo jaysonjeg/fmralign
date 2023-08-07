@@ -58,7 +58,7 @@ def generate_Xi_Yi(labels, X, Y, masker, verbose):
         yield X_[:, i], Y_[:, i]
 
 
-def fit_one_piece(X_i, Y_i, alignment_method):
+def fit_one_piece(X_i, Y_i, alignment_method, alignment_kwargs):
     """Align source and target data in one piece i, X_i and Y_i, using
     alignment method and learn transformation to map X to Y.
 
@@ -74,6 +74,7 @@ def fit_one_piece(X_i, Y_i, alignment_method):
         'ridge_cv', 'permutation', 'diagonal'
         - or an instance of one of alignment classes
             (imported from functional_alignment.alignment_methods)
+    **alignment_kwargs: extra arguments passed to alignment method
     Returns
     -------
     alignment_algo
@@ -81,17 +82,17 @@ def fit_one_piece(X_i, Y_i, alignment_method):
     """
 
     if alignment_method == "identity":
-        alignment_algo = alignment_methods.Identity()
+        alignment_algo = alignment_methods.Identity(**alignment_kwargs)
     elif alignment_method == "scaled_orthogonal":
-        alignment_algo = alignment_methods.ScaledOrthogonalAlignment()
+        alignment_algo = alignment_methods.ScaledOrthogonalAlignment(**alignment_kwargs)
     elif alignment_method == "ridge_cv":
-        alignment_algo = alignment_methods.RidgeAlignment()
+        alignment_algo = alignment_methods.RidgeAlignment(**alignment_kwargs)
     elif alignment_method == "permutation":
-        alignment_algo = alignment_methods.Hungarian()
+        alignment_algo = alignment_methods.Hungarian(**alignment_kwargs)
     elif alignment_method == "optimal_transport":
-        alignment_algo = alignment_methods.OptimalTransportAlignment()
+        alignment_algo = alignment_methods.OptimalTransportAlignment(**alignment_kwargs)
     elif alignment_method == "diagonal":
-        alignment_algo = alignment_methods.DiagonalAlignment()
+        alignment_algo = alignment_methods.DiagonalAlignment(**alignment_kwargs)
     elif isinstance(
         alignment_method,
         (

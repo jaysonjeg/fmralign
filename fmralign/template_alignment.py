@@ -39,8 +39,8 @@ def _rescaled_euclidean_mean(imgs, scale_average=False):
 
     return average_img
 
-def _align_one_image_to_template(img,alignment_method,clustering,n_jobs,template):
-    piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs)
+def _align_one_image_to_template(img,alignment_method,clustering,n_jobs,template,alignment_kwargs):
+    piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs,alignment_kwargs=alignment_kwargs)
     piecewise_estimator.fit(img, template) 
     return piecewise_estimator
 
@@ -54,13 +54,14 @@ def _align_images_to_template(
     memory_level,
     n_jobs,
     verbose,
+    alignment_kwargs
 ):
     """Convenience function : for a list of images, return the list
     of estimators (PairwiseAlignment instances) aligning each of them to a
     common target, the template. All arguments are used in PairwiseAlignment
     """
 
-    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_template)(img,alignment_method,clustering,n_jobs,template) for img in imgs)       
+    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_template)(img,alignment_method,clustering,n_jobs,template,alignment_kwargs) for img in imgs)       
     aligned_imgs = [piecewise_estimators[i].transform(imgs[i]) for i in range(len(imgs))] 
  
     return aligned_imgs, piecewise_estimators
@@ -77,7 +78,8 @@ def _create_template(
     memory_level,
     n_jobs,
     verbose,
-    template_method=1
+    template_method=1,
+    alignment_kwargs={}
 ):
     """Create template through alternate minimization.  Compute iteratively :
     * T minimizing sum(||R_i X_i-T||) which is the mean of aligned images (RX_i)
@@ -117,7 +119,7 @@ def _create_template(
             aligned_imgs=[imgs[0]] 
             current_template = imgs[0]
             for i in range(1,len(imgs)):
-                piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs)
+                piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs,alignment_kwargs=alignment_kwargs)
                 piecewise_estimator.fit(imgs[i], current_template)
                 new_img = piecewise_estimator.transform(imgs[i])
                 aligned_imgs.append(new_img)
@@ -137,6 +139,7 @@ def _create_template(
             memory_level,
             n_jobs,
             verbose,
+            alignment_kwargs
         )
 
     return template, piecewise_estimators
@@ -163,7 +166,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         memory_level=0,
         n_jobs=1,
         verbose=0,
-        template_method=1
+        template_method=1,
+        alignment_kwargs={}
     ):
         """
         Parameters
@@ -209,6 +213,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             1: same as original fmralign code
             2: hyperalignment method, on first iteration the new template is the average of all previous aligned images
             3: hyperalignment method, on first iteration the new template is the average of the previous template and the latest image
+        alignment_kwargs: dict
+            Additional keyword arguments to pass to the alignment method
         """
         self.template = None
         self.template_history = None
@@ -223,12 +229,13 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         self.n_jobs = n_jobs
         self.verbose = verbose
         self.template_method=template_method
+        self.alignment_kwargs = alignment_kwargs
 
     def fit_to_template(self,imgs):
         """
         Fit new imgs to pre-calculated template
         """
-        _,self.estimators = _align_images_to_template(imgs, self.template, self.alignment_method, self.clustering, self.n_bags, self.memory, self.memory_level,self.n_jobs, self.verbose)
+        _,self.estimators = _align_images_to_template(imgs, self.template, self.alignment_method, self.clustering, self.n_bags, self.memory, self.memory_level,self.n_jobs, self.verbose,self.alignment_kwargs)
     def fit(self, imgs):
         """
         Learn a template from source images, using alignment.
@@ -262,7 +269,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             self.memory_level,
             self.n_jobs,
             self.verbose,
-            self.template_method
+            self.template_method,
+            self.alignment_kwargs
         )
         if self.save_template is not None:
             self.template.to_filename(self.save_template)

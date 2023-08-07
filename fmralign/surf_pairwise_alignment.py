@@ -48,7 +48,7 @@ def generate_Xi_Yi(labels, X, Y, verbose):
         yield X[:, i], Y[:, i]
 
 
-def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type, verbose):
+def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type, verbose, alignment_kwargs):
     """ Create one parcellation of n_pieces and align each source and target
     data in one piece i, X_i and Y_i, using alignment method
     and learn transformation to map X to Y.
@@ -70,6 +70,7 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
         Whether to parallelize with multiple processes or threads
     verbose: integer, optional
         Indicate the level of verbosity. By default, nothing is printed
+    alignment_kwargs: extra arguments passed to alignment method
 
     Returns
     -------
@@ -81,7 +82,7 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
 
     fit = Parallel(n_jobs, prefer=parallel_type, verbose=verbose)(
         delayed(fit_one_piece)(
-            X_i, Y_i, alignment_method
+            X_i, Y_i, alignment_method, alignment_kwargs
         ) for X_i, Y_i in generate_Xi_Yi(labels, X_, Y_, verbose)
     )
 
@@ -94,7 +95,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
     regions independently.
     """
 
-    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0):
+    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={}):
         """
         If n_pieces > 1, decomposes the images into regions \
         and align each source/target region independantly.
@@ -118,12 +119,14 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
             Whether to parallelize with multiple processes or threads
         verbose: integer, optional (default = 0)
             Indicate the level of verbosity. By default, nothing is printed.
+        alignment_kwargs: any extra arguments are passed to the alignment method
         """
         self.alignment_method = alignment_method
         self.clustering = clustering
         self.n_jobs = n_jobs
         self.parallel_type = parallel_type
         self.verbose = verbose
+        self.alignment_kwargs=alignment_kwargs
 
     def fit(self, X, Y):
         """Fit data X and Y and learn transformation to map X to Y
@@ -146,7 +149,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
             warnings.warn(f'UserWarning: ntimepoints {ntimepoints} < nVerticesInLargestCluster {nVerticesInLargestCluster}')
         
         self.labels_, self.fit_ = fit_parcellation(
-            X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose)
+            X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs)
         # not list here unlike pairwise
 
         return self
