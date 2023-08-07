@@ -39,9 +39,9 @@ def _rescaled_euclidean_mean(imgs, scale_average=False):
 
     return average_img
 
-def _align_one_image_to_template(img,alignment_method,clustering,n_jobs,template,alignment_kwargs):
+def _align_one_image_to_target(img,alignment_method,clustering,n_jobs,target,alignment_kwargs):
     piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs,alignment_kwargs=alignment_kwargs)
-    piecewise_estimator.fit(img, template) 
+    piecewise_estimator.fit(img, target) 
     return piecewise_estimator
 
 def _align_images_to_template(
@@ -54,18 +54,38 @@ def _align_images_to_template(
     memory_level,
     n_jobs,
     verbose,
-    alignment_kwargs
+    alignment_kwargs,
 ):
     """Convenience function : for a list of images, return the list
     of estimators (PairwiseAlignment instances) aligning each of them to a
     common target, the template. All arguments are used in PairwiseAlignment
     """
-
-    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_template)(img,alignment_method,clustering,n_jobs,template,alignment_kwargs) for img in imgs)       
+    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_target)(img,alignment_method,clustering,n_jobs,template,alignment_kwargs) for img in imgs)       
     aligned_imgs = [piecewise_estimators[i].transform(imgs[i]) for i in range(len(imgs))] 
- 
+
     return aligned_imgs, piecewise_estimators
 
+def _align_images_to_template_excluding_self(
+    imgs,
+    aligned_imgs,
+    alignment_method,
+    clustering,
+    n_bags,
+    memory,
+    memory_level,
+    n_jobs,
+    verbose,
+    alignment_kwargs,
+    scale_template=None
+):
+    """As above, but it will align each subject to a slightly different template which is the average of all subjects excluding that subject. This requires argument scale_template which will be passed to _rescaled_euclidean_mean
+    """
+
+    get_this_template = lambda i: _rescaled_euclidean_mean([item for index,item in enumerate(aligned_imgs) if index!=i], scale_template)
+    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_target)(imgs[i],alignment_method,clustering,n_jobs,get_this_template(i),alignment_kwargs) for i in range(len(imgs)))       
+    aligned_imgs = [piecewise_estimators[i].transform(imgs[i]) for i in range(len(imgs))] 
+
+    return aligned_imgs, piecewise_estimators
 
 def _create_template(
     imgs,
@@ -79,6 +99,7 @@ def _create_template(
     n_jobs,
     verbose,
     template_method=1,
+    include_current_subject=True,
     alignment_kwargs={}
 ):
     """Create template through alternate minimization.  Compute iteratively :
@@ -101,8 +122,10 @@ def _create_template(
        the template is simply the mean of the input images.
     template_method: int
         1: same as original fmralign code
-        2: hyperalignment method, on first iteration the new template is the average of all previous aligned images
-        3: hyperalignment method, on first iteration the new template is the average of the previous template and the latest image
+        2: hyperalignment method, where published?, on first iteration the new template is the average of all previous aligned images
+        3: hyperalignment method in https://doi.org/10.1016/j.neuron.2011.08.026 and https://doi.org/10.1371/journal.pcbi.1006120, on first iteration the new template (for next subject) is the average of the previous template and the current subject's aligned image. Needs n_iter=1.  exclude_current_subject=True for https://doi.org/10.1371/journal.pcbi, or False for https://doi.org/10.1016/j.neuron.2011.08.026
+    include_current_subject: bool
+        whether to align subject's to the template including themself or not
     All other arguments are the same are passed to PairwiseAlignment
 
     Returns
@@ -115,7 +138,8 @@ def _create_template(
     aligned_imgs = imgs
     for iter in range(n_iter):
 
-        if iter==0 and template_method != 1: #hyperalignment method
+        if iter==0 and template_method != 1: 
+            assert(n_iter==2) #hyperalignment method needs 2 iterations after the first round
             aligned_imgs=[imgs[0]] 
             current_template = imgs[0]
             for i in range(1,len(imgs)):
@@ -128,19 +152,33 @@ def _create_template(
                 elif template_method==3: #new template is average of previous template and latest image
                     current_template = _rescaled_euclidean_mean([current_template, new_img],scale_template)  
 
-        template = _rescaled_euclidean_mean(aligned_imgs, scale_template)
-        aligned_imgs, piecewise_estimators = _align_images_to_template(
-            imgs,
-            template,
-            alignment_method,
-            clustering,
-            n_bags,
-            memory,
-            memory_level,
-            n_jobs,
-            verbose,
-            alignment_kwargs
-        )
+        if include_current_subject==True:
+            template = _rescaled_euclidean_mean(aligned_imgs, scale_template)
+            aligned_imgs, piecewise_estimators = _align_images_to_template(
+                imgs,
+                template,
+                alignment_method,
+                clustering,
+                n_bags,
+                memory,
+                memory_level,
+                n_jobs,
+                verbose,
+                alignment_kwargs
+            )
+        elif include_current_subject==False: 
+            aligned_imgs, piecewise_estimators = _align_images_to_template_excluding_self(
+                imgs,
+                aligned_imgs,
+                alignment_method,
+                clustering,
+                n_bags,
+                memory,
+                memory_level,
+                n_jobs,
+                verbose,
+                alignment_kwargs, scale_template=None)
+            template = _rescaled_euclidean_mean(aligned_imgs, scale_template)
 
     return template, piecewise_estimators
 
@@ -167,6 +205,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         n_jobs=1,
         verbose=0,
         template_method=1,
+        include_current_subject=True,
         alignment_kwargs={}
     ):
         """
@@ -229,6 +268,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         self.n_jobs = n_jobs
         self.verbose = verbose
         self.template_method=template_method
+        self.include_current_subject=include_current_subject
         self.alignment_kwargs = alignment_kwargs
 
     def fit_to_template(self,imgs):
@@ -270,7 +310,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             self.n_jobs,
             self.verbose,
             self.template_method,
-            self.alignment_kwargs
+            self.include_current_subject,
+            self.alignment_kwargs,
         )
         if self.save_template is not None:
             self.template.to_filename(self.save_template)
