@@ -77,6 +77,7 @@ def _create_template(
     memory_level,
     n_jobs,
     verbose,
+    template_method=1
 ):
     """Create template through alternate minimization.  Compute iteratively :
     * T minimizing sum(||R_i X_i-T||) which is the mean of aligned images (RX_i)
@@ -96,22 +97,36 @@ def _create_template(
        Number of iterations in the alternate minimization. Each image is
        aligned n_iter times to the evolving template. If n_iter = 0,
        the template is simply the mean of the input images.
+    template_method: int
+        1: same as original fmralign code
+        2: hyperalignment method, on first iteration the new template is the average of all previous aligned images
+        3: hyperalignment method, on first iteration the new template is the average of the previous template and the latest image
     All other arguments are the same are passed to PairwiseAlignment
 
     Returns
     -------
     template: list of 3D Niimgs of length (n_sample)
         Models the barycenter of input imgs
-    template_history: list of list of 3D Niimgs
-        List of the intermediate templates computed at the end of each iteration
+    piecewise_estimators
     """
 
     aligned_imgs = imgs
-    template_history = []
     for iter in range(n_iter):
+
+        if iter==0 and template_method != 1: #hyperalignment method
+            aligned_imgs=[imgs[0]] 
+            current_template = imgs[0]
+            for i in range(1,len(imgs)):
+                piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs)
+                piecewise_estimator.fit(imgs[i], current_template)
+                new_img = piecewise_estimator.transform(imgs[i])
+                aligned_imgs.append(new_img)
+                if template_method==2: #new template is average of all previous aligned images
+                    current_template = _rescaled_euclidean_mean(aligned_imgs,scale_template)
+                elif template_method==3: #new template is average of previous template and latest image
+                    current_template = _rescaled_euclidean_mean([current_template, new_img],scale_template)  
+
         template = _rescaled_euclidean_mean(aligned_imgs, scale_template)
-        if 0 < iter < n_iter - 1:
-            template_history.append(template)
         aligned_imgs, piecewise_estimators = _align_images_to_template(
             imgs,
             template,
@@ -148,6 +163,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         memory_level=0,
         n_jobs=1,
         verbose=0,
+        template_method=1
     ):
         """
         Parameters
@@ -189,6 +205,10 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             'all CPUs', -2 'all CPUs but one', and so on.
         verbose: integer, optional (default = 0)
             Indicate the level of verbosity. By default, nothing is printed.
+        template_method: int
+            1: same as original fmralign code
+            2: hyperalignment method, on first iteration the new template is the average of all previous aligned images
+            3: hyperalignment method, on first iteration the new template is the average of the previous template and the latest image
         """
         self.template = None
         self.template_history = None
@@ -202,7 +222,13 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         self.memory_level = memory_level
         self.n_jobs = n_jobs
         self.verbose = verbose
+        self.template_method=template_method
 
+    def fit_to_template(self,imgs):
+        """
+        Fit new imgs to pre-calculated template
+        """
+        _,self.estimators = _align_images_to_template(imgs, self.template, self.alignment_method, self.clustering, self.n_bags, self.memory, self.memory_level,self.n_jobs, self.verbose)
     def fit(self, imgs):
         """
         Learn a template from source images, using alignment.
@@ -236,6 +262,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             self.memory_level,
             self.n_jobs,
             self.verbose,
+            self.template_method
         )
         if self.save_template is not None:
             self.template.to_filename(self.save_template)
