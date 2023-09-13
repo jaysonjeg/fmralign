@@ -95,7 +95,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
     regions independently.
     """
 
-    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={}):
+    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={}, gamma=0):
         """
         If n_pieces > 1, decomposes the images into regions \
         and align each source/target region independantly.
@@ -120,6 +120,8 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         verbose: integer, optional (default = 0)
             Indicate the level of verbosity. By default, nothing is printed.
         alignment_kwargs: any extra arguments are passed to the alignment method
+        gamma: float, optional (default = 0) range 0 to 1
+            Regularization parameter. If gamma==0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images. 
         """
         self.alignment_method = alignment_method
         self.clustering = clustering
@@ -127,6 +129,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         self.parallel_type = parallel_type
         self.verbose = verbose
         self.alignment_kwargs=alignment_kwargs
+        self.gamma=gamma
 
     def fit(self, X, Y):
         """Fit data X and Y and learn transformation to map X to Y
@@ -148,6 +151,9 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         if ntimepoints < nVerticesInLargestCluster:
             warnings.warn(f'UserWarning: ntimepoints {ntimepoints} < nVerticesInLargestCluster {nVerticesInLargestCluster}')
         
+        if self.gamma:
+            Y = np.average([X,Y],axis=0,weights=[self.gamma,1-self.gamma])
+
         self.labels_, self.fit_ = fit_parcellation(
             X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs)
         # not list here unlike pairwise
