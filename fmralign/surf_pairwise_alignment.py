@@ -10,7 +10,7 @@ from fmralign._utils import piecewise_transform
 from fmralign.pairwise_alignment import fit_one_piece
 import warnings
 
-def generate_Xi_Yi(labels, X, Y, verbose):
+def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, verbose):
     """ Generate source and target data X_i and Y_i for each piece i.
 
     Parameters
@@ -21,9 +21,8 @@ def generate_Xi_Yi(labels, X, Y, verbose):
         Source data
     Y: Niimg-like object
         Target data
-    masker: instance of NiftiMasker or MultiNiftiMasker
-        Masker to be used on the data. For more information see:
-        http://nilearn.github.io/manipulating_images/masker_objects.html
+    per_parcel_kwargs: dict
+        extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel will be added to alignment_kwargs
     verbose: integer, optional.
         Indicate the level of verbosity.
 
@@ -33,22 +32,23 @@ def generate_Xi_Yi(labels, X, Y, verbose):
         Source data for piece i (shape : n_samples, n_features)
     Y_i: ndarray
         Target data for piece i (shape : n_samples, n_features)
+    kwargs_kth_parcel: dict
+        extra arguments passed to alignment method, that are unique to each parcel
 
     """
 
     unique_labels = np.unique(labels)
-
     for k in range(len(unique_labels)):
         label = unique_labels[k]
         i = label == labels
         if (k + 1) % 25 == 0 and verbose > 0:
             print("Fitting parcel: " + str(k + 1) +
                   "/" + str(len(unique_labels)))
-        # should return X_i Y_i
-        yield X[:, i], Y[:, i]
+        kwargs_kth_parcel = {key: value[k] for key, value in per_parcel_kwargs.items()} #Given a dictionary with values that are lists, return a new dictionary containing only the kth element of each value
+        yield X[:, i], Y[:, i], kwargs_kth_parcel
 
 
-def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type, verbose, alignment_kwargs):
+def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type, verbose, alignment_kwargs,per_parcel_kwargs):
     """ Create one parcellation of n_pieces and align each source and target
     data in one piece i, X_i and Y_i, using alignment method
     and learn transformation to map X to Y.
@@ -70,7 +70,10 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
         Whether to parallelize with multiple processes or threads
     verbose: integer, optional
         Indicate the level of verbosity. By default, nothing is printed
-    alignment_kwargs: extra arguments passed to alignment method
+    alignment_kwargs: dict
+        extra arguments passed to alignment method. Dictionary of keys (argument name) and values (value, same for each parcel)
+    per_parcel_kwargs: dict
+        extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel is added to alignment_kwargs
 
     Returns
     -------
@@ -82,8 +85,8 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
 
     fit = Parallel(n_jobs, prefer=parallel_type, verbose=verbose)(
         delayed(fit_one_piece)(
-            X_i, Y_i, alignment_method, alignment_kwargs
-        ) for X_i, Y_i in generate_Xi_Yi(labels, X_, Y_, verbose)
+            X_i, Y_i, alignment_method, dict(alignment_kwargs, **kwargs_kth_parcel)
+        ) for X_i, Y_i, kwargs_kth_parcel in generate_Xi_Yi(labels, X_, Y_, per_parcel_kwargs, verbose)
     )
 
     return labels, fit
@@ -95,7 +98,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
     regions independently.
     """
 
-    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={}, gamma=0):
+    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={},per_parcel_kwargs={}, gamma=0):
         """
         If n_pieces > 1, decomposes the images into regions \
         and align each source/target region independantly.
@@ -119,7 +122,10 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
             Whether to parallelize with multiple processes or threads
         verbose: integer, optional (default = 0)
             Indicate the level of verbosity. By default, nothing is printed.
-        alignment_kwargs: any extra arguments are passed to the alignment method
+        alignment_kwargs: dict
+            any extra arguments are passed to the alignment method
+        per_parcel_kwargs: dict
+            extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel will be added to alignment_kwargs
         gamma: float, optional (default = 0) range 0 to 1
             Regularization parameter. If gamma==0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images. 
         """
@@ -129,6 +135,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         self.parallel_type = parallel_type
         self.verbose = verbose
         self.alignment_kwargs=alignment_kwargs
+        self.per_parcel_kwargs=per_parcel_kwargs
         self.gamma=gamma
 
     def fit(self, X, Y):
@@ -155,7 +162,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
             Y = np.average([X,Y],axis=0,weights=[self.gamma,1-self.gamma])
 
         self.labels_, self.fit_ = fit_parcellation(
-            X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs)
+            X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs,self.per_parcel_kwargs)
         # not list here unlike pairwise
 
         return self

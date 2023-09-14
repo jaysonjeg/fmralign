@@ -67,21 +67,21 @@ def _align_images_to_template(
 '''
 
 
-def _align_images_to_target(source_imgs,target_img,clustering,alignment_method,alignment_kwargs,gamma=0):
+def _align_images_to_target(source_imgs,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,gamma=0):
     """
     Parallelize calling _align_one_image for all source_imgs
     """
-    aligners= Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image)(source_img,target_img,clustering,alignment_method,alignment_kwargs,n_jobs=1,parallel_type='threads',gamma=gamma) for source_img in source_imgs)
+    aligners= Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image)(source_img,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_jobs=1,parallel_type='threads',gamma=gamma) for source_img in source_imgs)
     return aligners
-def _align_one_image(source_img,target_img,clustering,alignment_method,alignment_kwargs,n_jobs=1,parallel_type='threads',gamma=0):
-    aligner= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs, parallel_type=parallel_type,alignment_kwargs=alignment_kwargs,gamma=gamma)
+def _align_one_image(source_img,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_jobs=1,parallel_type='threads',gamma=0):
+    aligner= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs, parallel_type=parallel_type,alignment_kwargs=alignment_kwargs,per_parcel_kwargs=per_parcel_kwargs,gamma=gamma)
     aligner.fit(source_img, target_img)
     return aligner
-def _align_one_image_without_self(img,template,level_1_aligned_img,n_imgs,normalizer_template,clustering,alignment_method,alignment_kwargs,n_jobs=1,parallel_type='threads',gamma=0):
+def _align_one_image_without_self(img,template,level_1_aligned_img,n_imgs,normalizer_template,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_jobs=1,parallel_type='threads',gamma=0):
     #similar to _align_one_image, except it also subtracts the subject's aligned image from the template before aligning the other images to it
     template = (template * n_imgs - level_1_aligned_img) / (n_imgs - 1)
     template = normalizer_template(template)
-    aligner = _align_one_image(img,template,clustering,alignment_method,alignment_kwargs,n_jobs=n_jobs,parallel_type=parallel_type,gamma=gamma)
+    aligner = _align_one_image(img,template,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_jobs=n_jobs,parallel_type=parallel_type,gamma=gamma)
     return aligner
 def zscore(X):
     from sklearn.preprocessing import StandardScaler
@@ -98,7 +98,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
     new contrast for target subject.
     """
 
-    def __init__(self,alignment_method="identity",clustering=None,alignment_kwargs={}):
+    def __init__(self,alignment_method="identity",clustering=None,alignment_kwargs={},per_parcel_kwargs={}):
         """
         Parameters
         ----------
@@ -112,11 +112,14 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             Clustering labels for each vertex
         alignment_kwargs: dict
             Additional keyword arguments to pass to the alignment method
+        per_parcel_kwargs: dict
+            extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel will be added to alignment_kwargs
         """
         self.template = None
         self.alignment_method = alignment_method
         self.clustering = clustering
         self.alignment_kwargs = alignment_kwargs
+        self.per_parcel_kwargs = per_parcel_kwargs
 
     def make_template(self,imgs,n_iter,do_level_1,level1_equal_weight,normalize_imgs,normalize_template,remove_self,gamma=0):
         """
@@ -156,7 +159,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             template = normalizer_template(imgs[0]) #initial template is first subject's image
             aligned_imgs = [imgs[0]] #consider renaming this variable as aligned_imgs !!!
             for i in range(1,len(imgs)):
-                aligner = _align_one_image(imgs[i],template,self.clustering,self.alignment_method,self.alignment_kwargs,n_jobs=-1,parallel_type='threads',gamma=gamma)
+                aligner = _align_one_image(imgs[i],template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_jobs=-1,parallel_type='threads',gamma=gamma)
                 new_img = aligner.transform(imgs[i]) #image aligned to template
                 new_img = normalizer_imgs(new_img)
                 aligned_imgs.append(new_img) #slow step, maybe initialise as empty numpy array of objects? !!!
@@ -173,10 +176,10 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         for iter in range(n_iter):
             if remove_self: 
                 n_imgs = len(imgs)
-                aligners = Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image_without_self)(img,template,aligned_img,n_imgs,normalizer_template,self.clustering,self.alignment_method,self.alignment_kwargs,n_jobs=1,parallel_type='threads',gamma=gamma) for img,aligned_img in zip(imgs,aligned_imgs))    
+                aligners = Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image_without_self)(img,template,aligned_img,n_imgs,normalizer_template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_jobs=1,parallel_type='threads',gamma=gamma) for img,aligned_img in zip(imgs,aligned_imgs))    
             else:      
                 template = normalizer_template(template)                
-                aligners = _align_images_to_target(imgs,template,self.clustering,self.alignment_method,self.alignment_kwargs,gamma)
+                aligners = _align_images_to_target(imgs,template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,gamma)
             aligned_imgs = [aligners[i].transform(imgs[i]) for i in range(len(imgs))] 
             aligned_imgs = [normalizer_imgs(i) for i in aligned_imgs]
             template = np.mean(aligned_imgs,axis=0)
@@ -187,7 +190,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         """
         Fit new imgs to pre-calculated template
         """
-        self.estimators = _align_images_to_target(imgs,self.template,self.clustering,self.alignment_method,self.alignment_kwargs,gamma) 
+        self.estimators = _align_images_to_target(imgs,self.template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,gamma) 
 
     def transform(self,X,index):
         #Transform data array X with subject 'index''s aligner to the template 
