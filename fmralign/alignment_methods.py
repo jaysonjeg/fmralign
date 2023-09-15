@@ -17,7 +17,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.metrics.pairwise import pairwise_distances
 
 
-def scaled_procrustes(X, Y, scaling=False, primal=None):
+def scaled_procrustes(X, Y, scaling=False, promises_kF=0, primal=None):
     """Compute a mixing matrix R and a scaling sc such that Frobenius norm
     ||sc RX - Y||^2 is minimized and R is an orthogonal matrix.
 
@@ -33,6 +33,8 @@ def scaled_procrustes(X, Y, scaling=False, primal=None):
         - R is an orthogonal matrix
         - sc is a scalar
         If scaling is false sc is set to 1
+    kF: (n_features,n_features) nd array
+        from ProMises model
     primal: bool or None, optional,
          Whether the SVD is done on the YX^T (primal) or Y^TX (dual)
          if None primal is used iff n_features <= n_timeframes
@@ -51,12 +53,13 @@ def scaled_procrustes(X, Y, scaling=False, primal=None):
     if primal is None:
         primal = X.shape[0] >= X.shape[1]
     if primal:
-        A = Y.T.dot(X)
+        A = Y.T.dot(X) + (promises_kF *X.shape[0])
         if A.shape[0] == A.shape[1]:
             A += +1.0e-18 * np.eye(A.shape[0])
         U, s, V = linalg.svd(A, full_matrices=0)
         R = U.dot(V)
     else:  # "dual" mode
+        assert(promises_kF==0) #have not implemented dual mode for ProMises model yet
         Uy, sy, Vy = linalg.svd(Y, full_matrices=0)
         Ux, sx, Vx = linalg.svd(X, full_matrices=0)
         A = np.diag(sy).dot(Uy.T).dot(Ux).dot(np.diag(sx))
@@ -205,6 +208,8 @@ class ScaledOrthogonalAlignment(Alignment):
     -----------
     scaling : boolean, optional
         Determines whether a scaling parameter is applied to improve transform.
+    promises_kF: ndarray (n_vertices, n_vertices)
+        k * Local matrix for ProMises model, usually k*exp(-D) where D is the distance matrix
 
     Attributes
     -----------
@@ -212,9 +217,10 @@ class ScaledOrthogonalAlignment(Alignment):
         Optimal orthogonal transform
     """
 
-    def __init__(self, scaling=True):
+    def __init__(self, scaling=True,promises_kF=0):
         self.scaling = scaling
         self.scale = 1
+        self.promises_kF = promises_kF
 
     def fit(self, X, Y):
         """Fit orthogonal R s.t. ||sc XR - Y||^2
@@ -226,7 +232,7 @@ class ScaledOrthogonalAlignment(Alignment):
         Y: (n_samples, n_features) nd array
             target data
         """
-        R, sc = scaled_procrustes(X, Y, scaling=self.scaling)
+        R, sc = scaled_procrustes(X, Y, scaling=self.scaling, promises_kF=self.promises_kF)
         self.scale = sc
         self.R = sc * R
         return self
