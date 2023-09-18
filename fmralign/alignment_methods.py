@@ -16,8 +16,14 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics.pairwise import pairwise_distances
 
+def get_Wk(Xk,alpha):
+    #Get Wk from Xu et al 2012, for scaled_procrustes alignment
+    Uk, sk, Vk = linalg.svd(Xk, full_matrices=False)
+    S = 1/np.sqrt(((1-alpha)*np.square(sk)+alpha))
+    Wk = Vk.T @ np.diag(S) @ Vk
+    return Wk
 
-def scaled_procrustes(X, Y, scaling=False, promises_kF=0, primal=None):
+def scaled_procrustes(X, Y, scaling=False, promises_kF=0, scca_alpha=1, primal=None):
     """Compute a mixing matrix R and a scaling sc such that Frobenius norm
     ||sc RX - Y||^2 is minimized and R is an orthogonal matrix.
 
@@ -35,6 +41,8 @@ def scaled_procrustes(X, Y, scaling=False, promises_kF=0, primal=None):
         If scaling is false sc is set to 1
     kF: (n_features,n_features) nd array
         from ProMises model
+    scca_alpha: float (0,1]
+        alpha parameter for SCCA model from Xu et al 2012. 0 is CCA, 1 is hyperalignment
     primal: bool or None, optional,
          Whether the SVD is done on the YX^T (primal) or Y^TX (dual)
          if None primal is used iff n_features <= n_timeframes
@@ -48,6 +56,14 @@ def scaled_procrustes(X, Y, scaling=False, promises_kF=0, primal=None):
     """
     X = X.astype(np.float64, copy=False)
     Y = Y.astype(np.float64, copy=False)
+
+    if scca_alpha != 1:
+        assert(scca_alpha > 0 and scca_alpha <= 1)
+        Wx = get_Wk(X,scca_alpha)
+        Wy = get_Wk(Y,scca_alpha)
+        X = X @ Wx
+        Y = Y @ Wy
+
     if np.linalg.norm(X) == 0 or np.linalg.norm(Y) == 0:
         return np.eye(X.shape[1]), 1
     if primal is None:
@@ -65,6 +81,11 @@ def scaled_procrustes(X, Y, scaling=False, promises_kF=0, primal=None):
         A = np.diag(sy).dot(Uy.T).dot(Ux).dot(np.diag(sx))
         U, s, V = linalg.svd(A)
         R = Vy.T.dot(U).dot(V).dot(Vx)
+
+    if scca_alpha != 1:
+        Rx = Wx @ R
+        Ry = Wy
+        R = Rx @ (Ry.T) 
 
     if scaling:
         sc = s.sum() / (np.linalg.norm(X) ** 2)
@@ -210,6 +231,8 @@ class ScaledOrthogonalAlignment(Alignment):
         Determines whether a scaling parameter is applied to improve transform.
     promises_kF: ndarray (n_vertices, n_vertices)
         k * Local matrix for ProMises model, usually k*exp(-D) where D is the distance matrix
+    scca_alpha: float (0,1]
+        alpha parameter for SCCA model from Xu et al 2012. 0 is CCA, 1 is hyperalignment
 
     Attributes
     -----------
@@ -217,10 +240,11 @@ class ScaledOrthogonalAlignment(Alignment):
         Optimal orthogonal transform
     """
 
-    def __init__(self, scaling=True,promises_kF=0):
+    def __init__(self, scaling=True,promises_kF=0,scca_alpha=1):
         self.scaling = scaling
         self.scale = 1
         self.promises_kF = promises_kF
+        self.scca_alpha = scca_alpha
 
     def fit(self, X, Y):
         """Fit orthogonal R s.t. ||sc XR - Y||^2
@@ -232,7 +256,7 @@ class ScaledOrthogonalAlignment(Alignment):
         Y: (n_samples, n_features) nd array
             target data
         """
-        R, sc = scaled_procrustes(X, Y, scaling=self.scaling, promises_kF=self.promises_kF)
+        R, sc = scaled_procrustes(X, Y, scaling=self.scaling, promises_kF=self.promises_kF, scca_alpha=self.scca_alpha)
         self.scale = sc
         self.R = sc * R
         return self
