@@ -6,66 +6,55 @@ prediction of new subjects unseen images
 # License: simplified BSD
 
 import numpy as np
-from joblib import Memory, Parallel, delayed
+from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.decomposition import PCA, FastICA, IncrementalPCA
 from fmralign.surf_pairwise_alignment import SurfacePairwiseAlignment
 
-'''
-def _rescaled_euclidean_mean(imgs, scale_average=False):
-    """Make the Euclidian average of images
-
-    Parameters
-    ----------
-    imgs: list of Niimgs
-        Each img is 3D by default, but can also be 4D.
-    scale_average: boolean
-        If true, the returned average is scaled to have the average norm of imgs
-        If false, it will usually have a smaller norm than initial average
-        because noise will cancel across images
-
-    Returns
-    -------
-    average_img: Niimg
-        Average of imgs, with same shape as one img
+def _yield_imgs_one_parcel(clustering,imgs):
     """
-    average_img = np.mean(imgs, axis=0)
-    scale = 1
-    if scale_average:
-        X_norm = 0
-        for img in imgs:
-            X_norm += np.linalg.norm(img)
-        X_norm /= len(imgs)
-        scale = X_norm / np.linalg.norm(average_img)
-    average_img *= scale
-
-    return average_img
-
-def _align_one_image_to_target(img,alignment_method,clustering,n_jobs,target,alignment_kwargs):
-    piecewise_estimator= SurfacePairwiseAlignment(alignment_method, clustering, n_jobs=n_jobs,alignment_kwargs=alignment_kwargs)
-    piecewise_estimator.fit(img, target) 
-    return piecewise_estimator
-def _align_images_to_template(
-    imgs,
-    template,
-    alignment_method,
-    clustering,
-    n_bags,
-    memory,
-    memory_level,
-    n_jobs,
-    verbose,
-    alignment_kwargs,
-):
-    """Convenience function : for a list of images, return the list
-    of estimators (PairwiseAlignment instances) aligning each of them to a
-    common target, the template. All arguments are used in PairwiseAlignment
+    Called by make_lowdim_template.
+    Given list (nsubjects) of arrays (ntimepoints,nvertices), yields a list (nsubjects) of arrays (ntimepoints,nvertices_in_single_parcel)
     """
-    piecewise_estimators = Parallel(n_jobs=-1)(delayed(_align_one_image_to_target)(img,alignment_method,clustering,n_jobs,template,alignment_kwargs) for img in imgs)       
-    aligned_imgs = [piecewise_estimators[i].transform(imgs[i]) for i in range(len(imgs))] 
+    unique_labels=np.unique(clustering)
+    for k in range(len(unique_labels)):
+        label = unique_labels[k]
+        indices = clustering == label
+        imgs_one_parcel = [img[:,indices] for img in imgs]   
+        yield imgs_one_parcel
 
-    return aligned_imgs, piecewise_estimators
-'''
+def _do_dim_reduction(imgs_one_parcel,method):
+    """
+    Called by make_lowdim_template.
+    Given a list of identically sized 2D arrays, concatenate along horizontal axis, then do PCA on that axis and retain enough components so that the dimensionality reduced version has same shape as any of the original 2D arrays
+    """
+    imgs_one_parcel_concat = np.hstack(imgs_one_parcel) #concatenate all subjects' data across vertices
+    n_components = imgs_one_parcel[0].shape[1] #retain same no of components as no of vertices in this parcel
+    if method=='pca':
+        dimreduce = PCA(n_components=n_components, whiten=False,random_state=0)
+    elif method=='increm_pca':
+        dimreduce = IncrementalPCA(n_components=n_components,whiten=False)
+    if method=='ica':
+        dimreduce = FastICA(n_components=n_components,max_iter=100000) #default max_iter 200
+    newimgs = dimreduce.fit_transform(imgs_one_parcel_concat)
+    return newimgs
 
+def _combine_parcelwise_imgs(clustering,imgs,shape):
+    """
+    Called by make_lowdim_template
+    Combines time series data for each parcel separately into whole-brain time series
+    clustering: array (nvertices) of ints
+    imgs: list (nparcels) of arrays (ntimepoints,nvertices_in_each_parcel)
+    shape: tuple
+        shape of output array
+    """
+    result=np.zeros(shape,dtype=np.float16)
+    unique_labels=np.unique(clustering)
+    for k in range(len(unique_labels)):
+        label = unique_labels[k]
+        indices = clustering == label
+        result[:,indices] = imgs[k]
+    return result   
 
 def _align_images_to_target(source_imgs,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,gamma=0):
     """
@@ -90,7 +79,6 @@ def zscore(X):
 def normalize_to_unit_norm(X):
     return X/np.linalg.norm(X)
    
-
 class TemplateAlignment(BaseEstimator, TransformerMixin):
     """
     Decompose the source images into regions and summarize subjects information \
@@ -121,7 +109,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         self.alignment_kwargs = alignment_kwargs
         self.per_parcel_kwargs = per_parcel_kwargs
 
-    def make_template(self,imgs,n_iter,do_level_1,level1_equal_weight,normalize_imgs,normalize_template,remove_self,gamma=0):
+
+    def make_template(self,imgs,n_iter=1,do_level_1=False,level1_equal_weight=False,normalize_imgs=None,normalize_template=None,remove_self=False,gamma=0):
         """
         Make template image from a list of images. Combines elements of code from fmralign package and pyMVPA2 package, in particular using some similar naming as pyMVPA2. This function does 'level 1' (optional) and 'level 2' of pyMVPA2. Level 1 involves iteratively aligning images to an evolving template. Level 2 simultaneously aligns all images to a single template
         For standard hyperalignment: do_level_1=True, normalize_imgs='zscore', normalize_template='zscore', remove_self=True, level1_equal_weight=False
@@ -185,6 +174,33 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             template = np.mean(aligned_imgs,axis=0)
         self.template = normalizer_template(template)
 
+    def make_lowdim_template(self,clustering,imgs,method='pca'):
+        """
+        Make a template time series using dimensionality reduction.
+        Step 1: For each parcel, stack subjects' data across vertices to form a (time,nsubjects*nvertices_in_parcel) matrix, then do dimensionality reduction (PCA or ICA). Components will be linear combinations of some vertices in some subjects. The parcel's template is given by the time series of the first n components, where n is the number of vertices in that parcel originally. 
+        Step 2: Combine parcel-specific templates into whole-brain template.
+        Step 3: Within each parcel, uses Procrustes alignment to rotate the template, so as to maximize overlap with the group mean time series in anatomical space.
+
+        INPUTS:
+        imgs: list (nsubjects) of arrays (ntimepoints,nvertices)
+            Brain image data
+        clustering: array (nvertices) of ints
+            Parcel labels
+        method: string
+            'pca', 'ica', or 'increm_pca'
+
+        RETURNS:
+        lowdim_template_rotated: array (ntimepoints,nvertices)
+        """
+        
+        imgs_parcelwise_transformed = Parallel(n_jobs=-1)(delayed(_do_dim_reduction)(imgs_one_parcel,method) for imgs_one_parcel in _yield_imgs_one_parcel(clustering,imgs)) #Step 1
+        lowdim_template = _combine_parcelwise_imgs(clustering,imgs_parcelwise_transformed,imgs[0].shape) #Step 2
+
+        #Step 3
+        aligner = SurfacePairwiseAlignment(alignment_method='scaled_orthogonal',clustering=clustering,alignment_kwargs ={'scaling':True},parallel_type='processes',n_jobs=-1) 
+        aligner.fit( np.tile(lowdim_template,(len(imgs),1)) , np.vstack(imgs) )
+        template = zscore(aligner.transform(lowdim_template))
+        self.template = template
 
     def fit_to_template(self,imgs,gamma=0):
         """
