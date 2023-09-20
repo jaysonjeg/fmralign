@@ -240,10 +240,10 @@ class ScaledOrthogonalAlignment(Alignment):
         Optimal orthogonal transform
     """
 
-    def __init__(self, scaling=True,promises_kF=0,scca_alpha=1):
+    def __init__(self, scaling=True,promises_k=0,promises_F=0,scca_alpha=1):
         self.scaling = scaling
         self.scale = 1
-        self.promises_kF = promises_kF
+        self.promises_kF = promises_k * promises_F
         self.scca_alpha = scca_alpha
 
     def fit(self, X, Y):
