@@ -10,9 +10,9 @@ import sklearn
 from joblib import Parallel, delayed
 from scipy import linalg
 from scipy.optimize import linear_sum_assignment
-from scipy.sparse import diags
+from scipy.sparse import diags, csr_matrix
 from scipy.spatial.distance import cdist
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics.pairwise import pairwise_distances
 
@@ -22,6 +22,27 @@ def get_Wk(Xk,alpha):
     S = 1/np.sqrt(((1-alpha)*np.square(sk)+alpha))
     Wk = Vk.T @ np.diag(S) @ Vk
     return Wk
+
+def average_alignment_objects(objects):
+    """
+    Parameters
+    ----------
+    objects: list (n_bags) of alignment objects (e.g. fmralign.alignment_methods.ScaledOrthogonalAlignment)
+        Each object correponds to a separate bag. All objects correspond to the same parcel.
+    """
+    output = clone(objects[0])
+    if type(output) == ScaledOrthogonalAlignment:
+         output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+         output.scale = np.mean([i.scale for i in objects])
+    elif type(output) == Hungarian:
+        output.R = csr_matrix(np.mean(np.stack([i.R.toarray() for i in objects],axis=2),axis=2))
+    elif type(output) in [OptimalTransportAlignment,POTAlignment]:
+        output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+    elif type(output) == RidgeAlignment: #cannot use clone because R is not an array
+        objects[0].R.coef_ = np.mean(np.stack([i.R.coef_ for i in objects],axis=2),axis=2)
+        objects[0].R.intercept_ = np.mean([i.R.intercept_ for i in objects])
+        output = objects[0]
+    return output
 
 def scaled_procrustes(X, Y, scaling=False, promises_kF=0, scca_alpha=1, primal=None):
     """Compute a mixing matrix R and a scaling sc such that Frobenius norm
@@ -291,7 +312,7 @@ class RidgeAlignment(Alignment):
     """
 
     def __init__(self, alphas=[0.1, 1.0, 10.0, 100, 1000], cv=4):
-        self.alphas = [alpha for alpha in alphas]
+        self.alphas = alphas #[alpha for alpha in alphas]
         self.cv = cv
 
     def fit(self, X, Y):

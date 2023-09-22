@@ -66,22 +66,7 @@ def fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices):
     new_algo.fit(X_i[indices,:],Y_i[indices,:])
     return new_algo
 
-def average_alignment_objects(objects):
-    """
-    Parameters
-    ----------
-    objects: list (n_bags) of alignment objects (e.g. fmralign.alignment_methods.ScaledOrthogonalAlignment)
-        Each object correponds to a separate bag. All objects correspond to the same parcel.
-    """
-    output = clone(objects[0])
-    if type(output) == alignment_methods.ScaledOrthogonalAlignment:
-         output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
-         output.scale = np.mean([i.scale for i in objects])
-    """
-    if type(output) == alignment_methods.Hungarian:
-        output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
-    """
-    return output
+
 
 def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs):
     """Align source and target data in one piece i, X_i and Y_i, using
@@ -147,8 +132,7 @@ def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs):
         else:
             row_indices_for_each_bag = [np.random.choice(X_i.shape[0],X_i.shape[0],replace=True) for i in range(n_bags)]
             alignment_algos_per_bag = [fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices) for indices in row_indices_for_each_bag]
-            alignment_algo = average_alignment_objects(alignment_algos_per_bag)
-
+            alignment_algo = alignment_methods.average_alignment_objects(alignment_algos_per_bag)
     except UnboundLocalError:
         warn_msg = (
             "{} is an unrecognized ".format(alignment_method)
