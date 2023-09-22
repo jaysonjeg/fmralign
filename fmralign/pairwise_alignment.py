@@ -58,7 +58,32 @@ def generate_Xi_Yi(labels, X, Y, masker, verbose):
         yield X_[:, i], Y_[:, i]
 
 
-def fit_one_piece(X_i, Y_i, alignment_method, alignment_kwargs):
+def fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices):
+    """
+    Fit alignment algorithm to X_i and Y_i, but only using the rows of X_i and Y_i specified by indices
+    """
+    new_algo = clone(alignment_algo)
+    new_algo.fit(X_i[indices,:],Y_i[indices,:])
+    return new_algo
+
+def average_alignment_objects(objects):
+    """
+    Parameters
+    ----------
+    objects: list (n_bags) of alignment objects (e.g. fmralign.alignment_methods.ScaledOrthogonalAlignment)
+        Each object correponds to a separate bag. All objects correspond to the same parcel.
+    """
+    output = clone(objects[0])
+    if type(output) == alignment_methods.ScaledOrthogonalAlignment:
+         output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+         output.scale = np.mean([i.scale for i in objects])
+    """
+    if type(output) == alignment_methods.Hungarian:
+        output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+    """
+    return output
+
+def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs):
     """Align source and target data in one piece i, X_i and Y_i, using
     alignment method and learn transformation to map X to Y.
 
@@ -68,6 +93,8 @@ def fit_one_piece(X_i, Y_i, alignment_method, alignment_kwargs):
         Source data for piece i (shape : n_samples, n_features)
     Y_i: ndarray
         Target data for piece i (shape : n_samples, n_features)
+    n_bags: integer, optional (default = 1)
+        Number of bags to use for bagging. If n_bags > 1, then make n_bags bootstrap resamples of source and target image data. Each bag produces a different alignment matrix which are subsequently averaged. To make a bootstrap resample of image X, sample with replacement from the rows (nsamples) of X. In each bag, the same rows are selected for source and target images. The bagging process is done for each parcel independently.
     alignment_method: string
         Algorithm used to perform alignment between X_i and Y_i :
         - either 'identity', 'scaled_orthogonal', 'optimal_transport',
@@ -115,7 +142,13 @@ def fit_one_piece(X_i, Y_i, alignment_method, alignment_kwargs):
         warnings.warn(warn_msg)
         alignment_algo = alignment_methods.Identity()
     try:
-        alignment_algo.fit(X_i, Y_i)
+        if n_bags == 1:
+            alignment_algo.fit(X_i, Y_i)
+        else:
+            row_indices_for_each_bag = [np.random.choice(X_i.shape[0],X_i.shape[0],replace=True) for i in range(n_bags)]
+            alignment_algos_per_bag = [fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices) for indices in row_indices_for_each_bag]
+            alignment_algo = average_alignment_objects(alignment_algos_per_bag)
+
     except UnboundLocalError:
         warn_msg = (
             "{} is an unrecognized ".format(alignment_method)

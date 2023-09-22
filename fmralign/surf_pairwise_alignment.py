@@ -48,7 +48,7 @@ def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, verbose):
         yield X[:, i], Y[:, i], kwargs_kth_parcel
 
 
-def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type, verbose, alignment_kwargs,per_parcel_kwargs):
+def fit_parcellation(X_, Y_, alignment_method, clustering, n_bags, n_jobs, parallel_type, verbose, alignment_kwargs,per_parcel_kwargs):
     """ Create one parcellation of n_pieces and align each source and target
     data in one piece i, X_i and Y_i, using alignment method
     and learn transformation to map X to Y.
@@ -63,6 +63,8 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
         algorithm used to perform alignment between each region of X_ and Y_
     clustering: string or GiftiImage
         Surf atlas with parcels
+    n_bags: integer, optional (default = 1)
+        Number of bags. Each bag randomly resamples the same samples/timepoints from X_ and Y_
     n_jobs: integer, optional
         The number of CPUs to use to do the computation. -1 means
         'all CPUs', -2 'all CPUs but one', and so on.
@@ -80,16 +82,13 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_jobs, parallel_type
     alignment_algo
         Instance of alignment estimator class fitted for X_i, Y_i
     """
-    # choose indexes maybe with index_img to not
-    labels = clustering
-
     fit = Parallel(n_jobs, prefer=parallel_type, verbose=verbose)(
         delayed(fit_one_piece)(
-            X_i, Y_i, alignment_method, dict(alignment_kwargs, **kwargs_kth_parcel)
-        ) for X_i, Y_i, kwargs_kth_parcel in generate_Xi_Yi(labels, X_, Y_, per_parcel_kwargs, verbose)
+            X_i, Y_i, n_bags, alignment_method, dict(alignment_kwargs, **kwargs_kth_parcel)
+        ) for X_i, Y_i, kwargs_kth_parcel in generate_Xi_Yi(clustering, X_, Y_, per_parcel_kwargs, verbose)
     )
+    return fit
 
-    return labels, fit
 
 
 class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
@@ -98,7 +97,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
     regions independently.
     """
 
-    def __init__(self, alignment_method, clustering, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={},per_parcel_kwargs={}, gamma=0):
+    def __init__(self, alignment_method, clustering, n_bags=1, n_jobs=1, parallel_type='threads',verbose=0, alignment_kwargs={},per_parcel_kwargs={}, gamma=0):
         """
         If n_pieces > 1, decomposes the images into regions \
         and align each source/target region independantly.
@@ -115,6 +114,8 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
             (imported from functional_alignment.alignment_methods)
         clustering : numpy int array (n_vertices)
             Parcellation of vertices in clusters. Each vertex is assigned a parcel number
+        n_bags: integer, optional (default = 1)
+            Number of bags to use for bagging. If n_bags > 1, then make n_bags bootstrap resamples of source and target image data. Each bag produces a different alignment matrix which are subsequently averaged. To make a bootstrap resample of image X, sample with replacement from the rows (ntimepoints/nsamples) of X. In each bag, the same rows are selected for source and target images. The bagging process is done for each parcel independently.
         n_jobs: integer, optional (default = 1)
             The number of CPUs to use to do the computation. -1 means
             'all CPUs', -2 'all CPUs but one', and so on.
@@ -131,6 +132,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         """
         self.alignment_method = alignment_method
         self.clustering = clustering
+        self.n_bags = n_bags
         self.n_jobs = n_jobs
         self.parallel_type = parallel_type
         self.verbose = verbose
@@ -151,7 +153,6 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         -------
         self
         """
-
         from collections import Counter
         ntimepoints=X.shape[0]
         nVerticesInLargestCluster = Counter(self.clustering)[0]
@@ -161,10 +162,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         if self.gamma:
             Y = np.average([X,Y],axis=0,weights=[self.gamma,1-self.gamma])
 
-        self.labels_, self.fit_ = fit_parcellation(
-            X, Y, self.alignment_method, self.clustering, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs,self.per_parcel_kwargs)
-        # not list here unlike pairwise
-
+        self.fit_ = fit_parcellation(X, Y, self.alignment_method, self.clustering, self.n_bags, self.n_jobs, self.parallel_type, self.verbose,self.alignment_kwargs,self.per_parcel_kwargs)
         return self
 
     def transform(self, X):
@@ -179,7 +177,7 @@ class SurfacePairwiseAlignment(BaseEstimator, TransformerMixin):
         X_transform: predicted data, numpy array (n_samples, n_vertices)
         """
         X_transform = piecewise_transform(
-            self.labels_, self.fit_, X)
+            self.clustering, self.fit_, X)
 
         return X_transform
 
