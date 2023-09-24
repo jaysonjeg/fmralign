@@ -68,7 +68,7 @@ def fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices):
 
 
 
-def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs):
+def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs, gamma):
     """Align source and target data in one piece i, X_i and Y_i, using
     alignment method and learn transformation to map X to Y.
 
@@ -86,12 +86,19 @@ def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs):
         'ridge_cv', 'permutation', 'diagonal'
         - or an instance of one of alignment classes
             (imported from functional_alignment.alignment_methods)
-    **alignment_kwargs: extra arguments passed to alignment method
+    alignment_kwargs: dict
+        extra arguments passed to alignment method
+    gamma: float, optional (default = 0) range 0 to 1
+        Regularization parameter. If gamma==0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images. 
     Returns
     -------
     alignment_algo
         Instance of alignment estimator class fitted for X_i, Y_i
     """
+
+    if gamma: 
+        Y_i *= np.float16(1-gamma) #do 1 step at a time to reduce memory usage
+        Y_i += X_i*np.float16(gamma)
 
     if alignment_method == "identity":
         alignment_algo = alignment_methods.Identity(**alignment_kwargs)
