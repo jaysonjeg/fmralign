@@ -48,7 +48,7 @@ def _combine_parcelwise_imgs(clustering,imgs,shape):
     shape: tuple
         shape of output array
     """
-    result=np.zeros(shape,dtype=np.float16)
+    result=np.zeros(shape,dtype=imgs[0].dtype)
     unique_labels=np.unique(clustering)
     for k in range(len(unique_labels)):
         label = unique_labels[k]
@@ -76,8 +76,9 @@ def zscore(X):
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
     return scaler.fit_transform(X)
-def normalize_to_unit_norm(X):
-    return X/np.linalg.norm(X)
+def normalize(X,target_norm):
+    #print(f'target is {target_norm}, X norm is {np.linalg.norm(X)}')
+    return target_norm*(X/np.linalg.norm(X))
    
 class TemplateAlignment(BaseEstimator, TransformerMixin):
     """
@@ -113,8 +114,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
     def make_template(self,imgs,n_bags=1,n_iter=1,do_level_1=False,level1_equal_weight=False,normalize_imgs=None,normalize_template=None,remove_self=False,gamma=0):
         """
         Make template image from a list of images. Combines elements of code from fmralign package and pyMVPA2 package, in particular using some similar naming as pyMVPA2. This function does 'level 1' (optional) and 'level 2' of pyMVPA2. Level 1 involves iteratively aligning images to an evolving template. Level 2 simultaneously aligns all images to a single template
-        For standard hyperalignment: do_level_1=True, normalize_imgs='zscore', normalize_template='zscore', remove_self=True, level1_equal_weight=False
-        For standard fmralign: do_level_1=False, normalize_imgs=None, normalize_template=None,remove_self=False
+        For standard hyperalignment: n_iter=1,do_level_1=True, normalize_imgs='zscore', normalize_template='zscore', remove_self=True, level1_equal_weight=False
+        For standard fmralign: n_iter=2,do_level_1=False, normalize_imgs='rescale', normalize_template='rescale',remove_self=False
             This is the GPA method: ref Gower, J. C. , & Dijksterhuis, G. B. (2004). Procrustes problems (Vol. 30). Oxford University Press on Demand
         Parameters
         ----------
@@ -135,22 +136,23 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         remove_self: bool
             in level 2, subtract that subject's aligned image from the template before aligning the other images to it, so that the subject is not included in the template that they are aligned to. 
         gamma: float [0 to 1]
-            regularization parameter for surf_pairwise_alignment
+            regularization parameter for surf_pairwise_alignment. If non-zero, make sure normalize_imgs and normalize_template are not None
         """
 
-
-        normalize_dict = {'zscore':zscore, 'rescale':normalize_to_unit_norm, None:lambda X: X}
-        normalizer_imgs = normalize_dict[normalize_imgs]
-        normalizer_template = normalize_dict[normalize_template]
         if (normalize_template=='rescale' or normalize_imgs=='rescale') and (imgs[0].dtype==np.float16):
             imgs = [i.astype(np.float32) for i in imgs] #rescaling might have problems if the original matrix norm is too big for dtype e.g. float16
+            avg_norm = np.mean([np.linalg.norm(i) for i in imgs])
+        normalize_to_avg_norm = lambda img: normalize(img,avg_norm)
+        normalize_dict = {'zscore':zscore, 'rescale':normalize_to_avg_norm, None:lambda X: X}
+        normalizer_imgs = normalize_dict[normalize_imgs]
+        normalizer_template = normalize_dict[normalize_template]
 
         #Level 1
         if do_level_1: 
             template = normalizer_template(imgs[0]) #initial template is first subject's image
-            aligned_imgs = [imgs[0]] #consider renaming this variable as aligned_imgs !!!
+            aligned_imgs = [imgs[0]]
             for i in range(1,len(imgs)):
-                aligner = _align_one_image(imgs[i],template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,n_jobs=-1,parallel_type='threads',gamma=gamma)
+                aligner = _align_one_image(imgs[i],template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,n_jobs=-1,parallel_type='processes',gamma=gamma)
                 new_img = aligner.transform(imgs[i]) #image aligned to template
                 new_img = normalizer_imgs(new_img)
                 aligned_imgs.append(new_img) #slow step, maybe initialise as empty numpy array of objects? !!!
@@ -212,6 +214,9 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         n_bags: int, default 1
             Number of bootstrap resamples in each pairwise alignment
         """
+        if gamma!=0: #as a heuristic, check that the mean columnwise variance of first image and template image are similar. If not, then taking weighted average of an image and the template will not be appropriate
+            assert(0.8 < imgs[0].var(axis=0).mean() < 1.2)
+            assert(0.8 < self.template.var(axis=0).mean() < 1.2)
         self.estimators = _align_images_to_target(imgs,self.template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,gamma) 
 
     def transform(self,X,index):
