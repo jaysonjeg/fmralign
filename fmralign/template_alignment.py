@@ -115,7 +115,8 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         """
         Make template image from a list of images. Combines elements of code from fmralign package and pyMVPA2 package, in particular using some similar naming as pyMVPA2. This function does 'level 1' (optional) and 'level 2' of pyMVPA2. Level 1 involves iteratively aligning images to an evolving template. Level 2 simultaneously aligns all images to a single template
         For standard hyperalignment: n_iter=1,do_level_1=True, normalize_imgs='zscore', normalize_template='zscore', remove_self=True, level1_equal_weight=False
-        For standard fmralign: n_iter=2,do_level_1=False, normalize_imgs='rescale', normalize_template='rescale',remove_self=False
+        For standard fmralign: n_iter=1,do_level_1=False, normalize_imgs='rescale', normalize_template='rescale',remove_self=False
+            n_iter==1 is equivalent to n_iter==2 in original fmralign package, because here the 2nd iteration is done in fit_to_template()
             This is the GPA method: ref Gower, J. C. , & Dijksterhuis, G. B. (2004). Procrustes problems (Vol. 30). Oxford University Press on Demand
         Parameters
         ----------

@@ -75,11 +75,12 @@ def scaled_procrustes(X, Y, scaling=False, promises_kF=0, scca_alpha=1, primal=N
     sc: int
         scaling parameter
     """
+    
     X = X.astype(np.float64, copy=False)
     Y = Y.astype(np.float64, copy=False)
 
     if scca_alpha != 1:
-        assert(scca_alpha > 0 and scca_alpha <= 1)
+        assert(scca_alpha >= 0 and scca_alpha <= 1)
         Wx = get_Wk(X,scca_alpha)
         Wy = get_Wk(Y,scca_alpha)
         X = X @ Wx
@@ -456,7 +457,7 @@ class OptimalTransportAlignment(Alignment):
     Parameters
     ----------
     metric : str(optional)
-        metric used to create transport cost matrix, \
+        metric used to create transport cost matrix, 
         see full list in scipy.spatial.distance.cdist doc
     reg : int (optional)
         level of entropic regularization
