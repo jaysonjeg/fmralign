@@ -498,6 +498,7 @@ class OptimalTransportAlignment(Alignment):
             geom, max_iterations=self.max_iter, threshold=self.tol
         )
         self.R = jax.jit(solver)(problem).matrix
+        self.R = self.R * self.R.shape[0] #normalize so each row/column sums to 1 again
 
         return self
 
