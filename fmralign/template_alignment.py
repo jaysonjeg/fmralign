@@ -37,6 +37,7 @@ def _do_dim_reduction(imgs_one_parcel,method):
     if method=='ica':
         dimreduce = FastICA(n_components=n_components,max_iter=100000) #default max_iter 200
     newimgs = dimreduce.fit_transform(imgs_one_parcel_concat)
+    del dimreduce, imgs_one_parcel,imgs_one_parcel_concat
     return newimgs
 
 def _combine_parcelwise_imgs(clustering,imgs,shape):
@@ -199,11 +200,11 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         RETURNS:
         lowdim_template_rotated: array (ntimepoints,nvertices)
         """
-        
-        imgs_parcelwise_transformed = Parallel(n_jobs=-1)(delayed(_do_dim_reduction)(imgs_one_parcel,method) for imgs_one_parcel in _yield_imgs_one_parcel(clustering,imgs)) #Step 1
+        imgs_parcelwise_transformed = Parallel(n_jobs=-1,prefer='processes')(delayed(_do_dim_reduction)(imgs_one_parcel,method) for imgs_one_parcel in _yield_imgs_one_parcel(clustering,imgs)) #Step 1
         lowdim_template = _combine_parcelwise_imgs(clustering,imgs_parcelwise_transformed,imgs[0].shape) #Step 2
 
         #Step 3
+        lowdim_template = lowdim_template.astype(imgs[0].dtype)
         aligner = SurfacePairwiseAlignment(alignment_method='scaled_orthogonal',clustering=clustering,alignment_kwargs ={'scaling':True},parallel_type='processes',n_bags=n_bags,n_jobs=-1) 
         aligner.fit( np.tile(lowdim_template,(len(imgs),1)) , np.vstack(imgs) )
         template = zscore(aligner.transform(lowdim_template))
