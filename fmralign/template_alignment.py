@@ -7,228 +7,81 @@ Uses functional alignment on Niimgs and predicts new subjects' unseen images.
 # License: simplified BSD
 
 import numpy as np
-from joblib import Memory, Parallel, delayed
-from nilearn.image import concat_imgs, index_img, load_img
-from nilearn.maskers._masker_validation import _check_embedded_nifti_masker
+from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.decomposition import PCA, FastICA, IncrementalPCA
+from fmralign.surf_pairwise_alignment import SurfacePairwiseAlignment
 
-from fmralign.pairwise_alignment import PairwiseAlignment
-
-
-def _rescaled_euclidean_mean(imgs, masker, scale_average=False):
+def _yield_imgs_one_parcel(clustering,imgs):
     """
-    Make the Euclidian average of images.
-
-    Parameters
-    ----------
-    imgs: list of Niimgs
-        Each img is 3D by default, but can also be 4D.
-    masker: instance of NiftiMasker or MultiNiftiMasker
-        Masker to be used on the data.
-    scale_average: boolean
-        If true, the returned average is scaled to have the average norm of imgs
-        If false, it will usually have a smaller norm than initial average
-        because noise will cancel across images
-
-    Returns
-    -------
-    average_img: Niimg
-        Average of imgs, with same shape as one img
+    Called by make_lowdim_template.
+    Given list (nsubjects) of arrays (ntimepoints,nvertices), yields a list (nsubjects) of arrays (ntimepoints,nvertices_in_single_parcel)
     """
-    masked_imgs = [masker.transform(img) for img in imgs]
-    average_img = np.mean(masked_imgs, axis=0)
-    scale = 1
-    if scale_average:
-        X_norm = 0
-        for img in masked_imgs:
-            X_norm += np.linalg.norm(img)
-        X_norm /= len(masked_imgs)
-        scale = X_norm / np.linalg.norm(average_img)
-    average_img *= scale
+    unique_labels=np.unique(clustering)
+    for k in range(len(unique_labels)):
+        label = unique_labels[k]
+        indices = clustering == label
+        imgs_one_parcel = [img[:,indices] for img in imgs]   
+        yield imgs_one_parcel
 
-    return masker.inverse_transform(average_img)
-
-
-def _align_images_to_template(
-    imgs,
-    template,
-    alignment_method,
-    n_pieces,
-    clustering,
-    n_bags,
-    masker,
-    memory,
-    memory_level,
-    n_jobs,
-    verbose,
-):
+def _do_dim_reduction(imgs_one_parcel,method):
     """
-    Convenience function.
-    For a list of images, return the list of estimators (PairwiseAlignment instances)
-    aligning each of them to a common target, the template.
-    All arguments are used in PairwiseAlignment.
+    Called by make_lowdim_template.
+    Given a list of identically sized 2D arrays, concatenate along horizontal axis, then do PCA on that axis and retain enough components so that the dimensionality reduced version has same shape as any of the original 2D arrays
     """
-    aligned_imgs = []
-    for img in imgs:
-        piecewise_estimator = PairwiseAlignment(
-            n_pieces=n_pieces,
-            alignment_method=alignment_method,
-            clustering=clustering,
-            n_bags=n_bags,
-            mask=masker,
-            memory=memory,
-            memory_level=memory_level,
-            n_jobs=n_jobs,
-            verbose=verbose,
-        )
-        piecewise_estimator.fit(img, template)
-        aligned_imgs.append(piecewise_estimator.transform(img))
-    return aligned_imgs
+    imgs_one_parcel_concat = np.hstack(imgs_one_parcel) #concatenate all subjects' data across vertices
+    n_components = imgs_one_parcel[0].shape[1] #retain same no of components as no of vertices in this parcel
+    if method=='pca':
+        dimreduce = PCA(n_components=n_components, whiten=False,random_state=0)
+    elif method=='increm_pca':
+        dimreduce = IncrementalPCA(n_components=n_components,whiten=False)
+    if method=='ica':
+        dimreduce = FastICA(n_components=n_components,max_iter=100000) #default max_iter 200
+    newimgs = dimreduce.fit_transform(imgs_one_parcel_concat)
+    del dimreduce, imgs_one_parcel,imgs_one_parcel_concat
+    return newimgs
 
-
-def _create_template(
-    imgs,
-    n_iter,
-    scale_template,
-    alignment_method,
-    n_pieces,
-    clustering,
-    n_bags,
-    masker,
-    memory,
-    memory_level,
-    n_jobs,
-    verbose,
-):
+def _combine_parcelwise_imgs(clustering,imgs,shape):
     """
-    Create template through alternate minimization.
-    Compute iteratively :
-    * T minimizing sum(||R_i X_i-T||) which is the mean of aligned images (RX_i)
-    * align initial images to new template T
-        (find transform R_i minimizing ||R_i X_i-T|| for each img X_i)
-
-
-    Parameters
-    ----------
-    imgs: List of Niimg-like objects
-       See http://nilearn.github.io/manipulating_images/input_output.html
-       source data. Every img must have the same length (n_sample)
-    scale_template: boolean
-        If true, template is rescaled after each inference so that it keeps
-        the same norm as the average of training images.
-    n_iter: int
-       Number of iterations in the alternate minimization. Each image is
-       aligned n_iter times to the evolving template. If n_iter = 0,
-       the template is simply the mean of the input images.
-    All other arguments are the same are passed to PairwiseAlignment
-
-    Returns
-    -------
-    template: list of 3D Niimgs of length (n_sample)
-        Models the barycenter of input imgs
-    template_history: list of list of 3D Niimgs
-        List of the intermediate templates computed at the end of each iteration
+    Called by make_lowdim_template
+    Combines time series data for each parcel separately into whole-brain time series
+    clustering: array (nvertices) of ints
+    imgs: list (nparcels) of arrays (ntimepoints,nvertices_in_each_parcel)
+    shape: tuple
+        shape of output array
     """
+    result=np.zeros(shape,dtype=imgs[0].dtype)
+    unique_labels=np.unique(clustering)
+    for k in range(len(unique_labels)):
+        label = unique_labels[k]
+        indices = clustering == label
+        result[:,indices] = imgs[k]
+    return result   
 
-    aligned_imgs = imgs
-    template_history = []
-    for iter in range(n_iter):
-        template = _rescaled_euclidean_mean(aligned_imgs, masker, scale_template)
-        if 0 < iter < n_iter - 1:
-            template_history.append(template)
-        aligned_imgs = _align_images_to_template(
-            imgs,
-            template,
-            alignment_method,
-            n_pieces,
-            clustering,
-            n_bags,
-            masker,
-            memory,
-            memory_level,
-            n_jobs,
-            verbose,
-        )
-
-    return template, template_history
-
-
-def _map_template_to_image(
-    imgs,
-    train_index,
-    template,
-    alignment_method,
-    n_pieces,
-    clustering,
-    n_bags,
-    masker,
-    memory,
-    memory_level,
-    n_jobs,
-    verbose,
-):
+def _align_images_to_target(source_imgs,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_bags,gamma=0):
     """
-    Learn alignment operator from the template toward new images.
-
-    Parameters
-    ----------
-    imgs: list of 3D Niimgs
-        Target images to learn mapping from the template to a new subject
-    train_index: list of int
-        Matching index between imgs and the corresponding template images to use
-        to learn alignment. len(train_index) must be equal to len(imgs)
-    template: list of 3D Niimgs
-        Learnt in a first step now used as source image
-    All other arguments are the same are passed to PairwiseAlignment
-
-
-    Returns
-    -------
-    mapping: instance of PairwiseAlignment class
-        Alignment estimator fitted to align the template with the input images
+    Parallelize calling _align_one_image for all source_imgs
     """
-
-    mapping_image = index_img(template, train_index)
-    mapping = PairwiseAlignment(
-        n_pieces=n_pieces,
-        alignment_method=alignment_method,
-        clustering=clustering,
-        n_bags=n_bags,
-        mask=masker,
-        memory=memory,
-        memory_level=memory_level,
-        n_jobs=n_jobs,
-        verbose=verbose,
-    )
-    mapping.fit(mapping_image, imgs)
-    return mapping
-
-
-def _predict_from_template_and_mapping(template, test_index, mapping):
-    """
-    From a template and an alignment estimator, predict new contrasts.
-
-    Parameters
-    ----------
-    template: list of 3D Niimgs
-        Learnt in a first step now used to predict some new data
-    test_index:
-        Index of the images not used to learn the alignment mapping and so
-        predictable without overfitting
-    mapping: instance of PairwiseAlignment class
-        Alignment estimator that must have been fitted already
-
-    Returns
-    -------
-    transformed_image: list of Niimgs
-        Prediction corresponding to each template image with index in test_index
-        once realigned to the new subjects
-    """
-    image_to_transform = index_img(template, test_index)
-    transformed_image = mapping.transform(image_to_transform)
-    return transformed_image
-
-
+    aligners= Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image)(source_img,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_bags,n_jobs=1,parallel_type='threads',gamma=gamma) for source_img in source_imgs)
+    return aligners
+def _align_one_image(source_img,target_img,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_bags,n_jobs=1,parallel_type='threads',gamma=0):
+    aligner= SurfacePairwiseAlignment(alignment_method, clustering, n_bags=n_bags, n_jobs=n_jobs, parallel_type=parallel_type,alignment_kwargs=alignment_kwargs,per_parcel_kwargs=per_parcel_kwargs,gamma=gamma)
+    aligner.fit(source_img, target_img)
+    return aligner
+def _align_one_image_without_self(img,template,level_1_aligned_img,n_imgs,normalizer_template,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_bags, n_jobs=1,parallel_type='threads',gamma=0):
+    #similar to _align_one_image, except it also subtracts the subject's aligned image from the template before aligning the other images to it
+    template = (template * n_imgs - level_1_aligned_img) / (n_imgs - 1)
+    template = normalizer_template(template)
+    aligner = _align_one_image(img,template,clustering,alignment_method,alignment_kwargs,per_parcel_kwargs,n_bags, n_jobs=n_jobs,parallel_type=parallel_type,gamma=gamma)
+    return aligner
+def zscore(X):
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    return scaler.fit_transform(X)
+def normalize(X,target_norm):
+    #print(f'target is {target_norm}, X norm is {np.linalg.norm(X)}')
+    return target_norm*(X/np.linalg.norm(X))
+   
 class TemplateAlignment(BaseEstimator, TransformerMixin):
     """
     Decompose the source images into regions and summarize subjects information
@@ -236,29 +89,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
     new contrast for target subject.
     """
 
-    def __init__(
-        self,
-        alignment_method="identity",
-        n_pieces=1,
-        clustering="kmeans",
-        scale_template=False,
-        n_iter=2,
-        save_template=None,
-        n_bags=1,
-        mask=None,
-        smoothing_fwhm=None,
-        standardize=False,
-        detrend=None,
-        target_affine=None,
-        target_shape=None,
-        low_pass=None,
-        high_pass=None,
-        t_r=None,
-        memory=Memory(location=None),
-        memory_level=0,
-        n_jobs=1,
-        verbose=0,
-    ):
+    def __init__(self,alignment_method="identity",clustering=None,alignment_kwargs={},per_parcel_kwargs={}):
         """
         Parameters
         ----------
@@ -268,235 +99,133 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
             'ridge_cv', 'permutation', 'diagonal'
             * or an instance of one of alignment classes (imported from
             functional_alignment.alignment_methods)
-        n_pieces: int, optional (default = 1)
-            Number of regions in which the data is parcellated for alignment.
-            If 1 the alignment is done on full scale data.
-            If > 1, the voxels are clustered and alignment is performed on each
-            cluster applied to X and Y.
-        clustering : string or 3D Niimg optional (default : kmeans)
-            'kmeans', 'ward', 'rena', 'hierarchical_kmeans' method used for
-            clustering of voxels based on functional signal,
-            passed to nilearn.regions.parcellations
-            If 3D Niimg, image used as predefined clustering,
-            n_bags and n_pieces are then ignored.
-        scale_template: boolean, default False
-            rescale template after each inference so that it keeps
-            the same norm as the average of training images.
-        n_iter: int
-           number of iteration in the alternate minimization. Each img is
-           aligned n_iter times to the evolving template. If n_iter = 0,
-           the template is simply the mean of the input images.
-        save_template: None or string(optional)
-            If not None, path to which the template will be saved.
-        n_bags: int, optional (default = 1)
-            If 1 : one estimator is fitted.
-            If >1 number of bagged parcellations and estimators used.
-        mask: Niimg-like object, instance of NiftiMasker or
-                                MultiNiftiMasker, optional (default = None)
-            Mask to be used on data. If an instance of masker is passed, then its
-            mask will be used. If no mask is given, it will be computed
-            automatically by a MultiNiftiMasker with default parameters.
-        smoothing_fwhm: float, optional (default = None)
-            If smoothing_fwhm is not None, it gives the size in millimeters
-            of the spatial smoothing to apply to the signal.
-        standardize: boolean, optional (default = None)
-            If standardize is True, the time-series are centered and normed:
-            their variance is put to 1 in the time dimension.
-        detrend: boolean, optional (default = None)
-            This parameter is passed to nilearn.signal.clean.
-            Please see the related documentation for details
-        target_affine: 3x3 or 4x4 matrix, optional (default = None)
-            This parameter is passed to nilearn.image.resample_img.
-            Please see the related documentation for details.
-        target_shape: 3-tuple of integers, optional (default = None)
-            This parameter is passed to nilearn.image.resample_img.
-            Please see the related documentation for details.
-        low_pass: None or float, optional (default = None)
-            This parameter is passed to nilearn.signal.clean.
-            Please see the related documentation for details.
-        high_pass: None or float, optional (default = None)
-            This parameter is passed to nilearn.signal.clean.
-            Please see the related documentation for details.
-        t_r: float, optional (default = None)
-            This parameter is passed to nilearn.signal.clean.
-            Please see the related documentation for details.
-        memory: instance of joblib.Memory or string (default = None)
-            Used to cache the masking process and results of algorithms.
-            By default, no caching is done. If a string is given, it is the
-            path to the caching directory.
-        memory_level: integer, optional (default = None)
-            Rough estimator of the amount of memory used by caching.
-            Higher value means more memory for caching.
-        n_jobs: integer, optional (default = 1)
-            The number of CPUs to use to do the computation. -1 means
-            'all CPUs', -2 'all CPUs but one', and so on.
-        verbose: integer, optional (default = 0)
-            Indicate the level of verbosity. By default, nothing is printed.
+        clustering: array: shape (nvertices,), dtype int
+            Clustering labels for each vertex
+        alignment_kwargs: dict
+            Additional keyword arguments to pass to the alignment method
+        per_parcel_kwargs: dict
+            extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel will be added to alignment_kwargs
         """
         self.template = None
-        self.template_history = None
         self.alignment_method = alignment_method
-        self.n_pieces = n_pieces
         self.clustering = clustering
-        self.n_iter = n_iter
-        self.scale_template = scale_template
-        self.save_template = save_template
-        self.n_bags = n_bags
-        self.mask = mask
-        self.smoothing_fwhm = smoothing_fwhm
-        self.standardize = standardize
-        self.detrend = detrend
-        self.target_affine = target_affine
-        self.target_shape = target_shape
-        self.low_pass = low_pass
-        self.high_pass = high_pass
-        self.t_r = t_r
-        self.memory = memory
-        self.memory_level = memory_level
-        self.n_jobs = n_jobs
-        self.verbose = verbose
+        self.alignment_kwargs = alignment_kwargs
+        self.per_parcel_kwargs = per_parcel_kwargs
 
-    def fit(self, imgs):
+
+    def make_template(self,imgs,n_bags=1,n_iter=1,do_level_1=False,level1_equal_weight=False,normalize_imgs=None,normalize_template=None,remove_self=False,gamma=0):
         """
-        Learn a template from source images, using alignment.
-
+        Make template image from a list of images. Combines elements of code from fmralign package and pyMVPA2 package, in particular using some similar naming as pyMVPA2. This function does 'level 1' (optional) and 'level 2' of pyMVPA2. Level 1 involves iteratively aligning images to an evolving template. Level 2 simultaneously aligns all images to a single template
+        For standard hyperalignment: n_iter=1,do_level_1=True, normalize_imgs='zscore', normalize_template='zscore', remove_self=True, level1_equal_weight=False
+        For standard fmralign: n_iter=1,do_level_1=False, normalize_imgs='rescale', normalize_template='rescale',remove_self=False
+            n_iter==1 is equivalent to n_iter==2 in original fmralign package, because here the 2nd iteration is done in fit_to_template()
+            This is the GPA method: ref Gower, J. C. , & Dijksterhuis, G. B. (2004). Procrustes problems (Vol. 30). Oxford University Press on Demand
         Parameters
         ----------
-        imgs: List of 4D Niimg-like or List of lists of 3D Niimg-like
-            Source subjects data. Each element of the parent list is one subject
-            data, and all must have the same length (n_samples).
-
-        Returns
-        -------
-        self
-
-        Attributes
-        ----------
-        self.template: 4D Niimg object
-            Length : n_samples
-
+        imgs: list(nsubjects) of arrays (nsamples,nvertices)
+            Source data
+        n_bags: int, default 1
+            Number of bootstrap resamples in each pairwise alignment
+        n_iter: int
+            number of iterations at level 2. Set to zero just to use mean of level 1 images as the template
+        do_level_1: bool
+            whether to do level 1. 
+        level1_equal_weight: bool
+            in level 1, weight each subject equally in the template. 
+        normalize_imgs: 'zscore', 'rescale', or None
+            To normalize each aligned image before taking the mean to make template. 'rescale' scales each image to have unit matrix Frobenius norm. 'zscore' zscores each column, so that each image contributes near-equally to each vertex. For hyperalignment, pick 'zscore'. 'rescale' might have problems if the original matrix norm is too big for dtype e.g. float16
+        normalize_template: 'zscore', 'rescale', or None
+            To normalize the template at each iteration. 
+        remove_self: bool
+            in level 2, subtract that subject's aligned image from the template before aligning the other images to it, so that the subject is not included in the template that they are aligned to. 
+        gamma: float [0 to 1]
+            regularization parameter for surf_pairwise_alignment. If non-zero, make sure normalize_imgs and normalize_template are not None
         """
-        # Check if the input is a list, if list of lists, concatenate each subjects
-        # data into one unique image.
-        if not isinstance(imgs, (list, np.ndarray)) or len(imgs) < 2:
-            raise ValueError(
-                "The method TemplateAlignment.fit() need a list input. "
-                "Each element of the list (Niimg-like or list of Niimgs) "
-                "is the data for one subject."
-            )
+
+        if (normalize_template=='rescale' or normalize_imgs=='rescale') and (imgs[0].dtype==np.float16):
+            imgs = [i.astype(np.float32) for i in imgs] #rescaling might have problems if the original matrix norm is too big for dtype e.g. float16
+            avg_norm = np.mean([np.linalg.norm(i) for i in imgs])
+        normalize_to_avg_norm = lambda img: normalize(img,avg_norm)
+        normalize_dict = {'zscore':zscore, 'rescale':normalize_to_avg_norm, None:lambda X: X}
+        normalizer_imgs = normalize_dict[normalize_imgs]
+        normalizer_template = normalize_dict[normalize_template]
+
+        #Level 1
+        if do_level_1: 
+            template = normalizer_template(imgs[0]) #initial template is first subject's image
+            aligned_imgs = [imgs[0]]
+            for i in range(1,len(imgs)):
+                aligner = _align_one_image(imgs[i],template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,n_jobs=-1,parallel_type='processes',gamma=gamma)
+                new_img = aligner.transform(imgs[i]) #image aligned to template
+                new_img = normalizer_imgs(new_img)
+                aligned_imgs.append(new_img) #slow step, maybe initialise as empty numpy array of objects? !!!
+                if level1_equal_weight: 
+                    template = np.average([template, new_img], weights=(i, 1.0), axis=0) #think they have it backwards in pymvpa
+                else: 
+                    template = np.mean([template,new_img],axis=0) #in this scenario, earlier images have lesser contribution to the template
+                template = normalizer_template(template)
         else:
-            if isinstance(imgs[0], (list, np.ndarray)):
-                imgs = [concat_imgs(img) for img in imgs]
+            aligned_imgs = [normalizer_imgs(i) for i in imgs]
+        
+        #Level 2
+        template = np.mean(aligned_imgs,axis=0) #initial template is average of aligned images
+        for iter in range(n_iter):
+            if remove_self: 
+                n_imgs = len(imgs)
+                aligners = Parallel(n_jobs=-1,prefer='processes')(delayed(_align_one_image_without_self)(img,template,aligned_img,n_imgs,normalizer_template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,n_jobs=1,parallel_type='threads',gamma=gamma) for img,aligned_img in zip(imgs,aligned_imgs))    
+            else:      
+                template = normalizer_template(template)                
+                aligners = _align_images_to_target(imgs,template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,gamma)
+            aligned_imgs = [aligners[i].transform(imgs[i]) for i in range(len(imgs))] 
+            aligned_imgs = [normalizer_imgs(i) for i in aligned_imgs]
+            template = np.mean(aligned_imgs,axis=0)
+        self.template = normalizer_template(template)
 
-        self.masker_ = _check_embedded_nifti_masker(self)
-        self.masker_.n_jobs = self.n_jobs  # self.n_jobs
-
-        # if masker_ has been provided a mask_img
-        if self.masker_.mask_img is None:
-            self.masker_.fit(imgs)
-        else:
-            self.masker_.fit()
-
-        self.template, self.template_history = _create_template(
-            imgs,
-            self.n_iter,
-            self.scale_template,
-            self.alignment_method,
-            self.n_pieces,
-            self.clustering,
-            self.n_bags,
-            self.masker_,
-            self.memory,
-            self.memory_level,
-            self.n_jobs,
-            self.verbose,
-        )
-        if self.save_template is not None:
-            self.template.to_filename(self.save_template)
-
-    def transform(self, imgs, train_index, test_index):
+    def make_lowdim_template(self,imgs,clustering,n_bags=1,method='pca'):
         """
-        Learn alignment between new subject and template calculated during fit,
-        then predict other conditions for this new subject.
-        Alignment is learnt between imgs and conditions in the template indexed by train_index.
-        Prediction correspond to conditions in the template index by test_index.
+        Make a template time series using dimensionality reduction.
+        Step 1: For each parcel, stack subjects' data across vertices to form a (time,nsubjects*nvertices_in_parcel) matrix, then do dimensionality reduction (PCA or ICA). Components will be linear combinations of some vertices in some subjects. The parcel's template is given by the time series of the first n components, where n is the number of vertices in that parcel originally. 
+        Step 2: Combine parcel-specific templates into whole-brain template.
+        Step 3: Within each parcel, uses Procrustes alignment to rotate the template, so as to maximize overlap with the group mean time series in anatomical space.
 
-        Parameters
-        ----------
-        imgs: List of 3D Niimg-like objects
-            Target subjects known data.
-            Every img must have length (number of sample) train_index.
-        train_index: list of ints
-            Indexes of the 3D samples used to map each img to the template.
-            Every index should be smaller than the number of images in the template.
-        test_index: list of ints
-            Indexes of the 3D samples to predict from the template and the mapping.
-            Every index should be smaller than the number of images in the template.
+        INPUTS:
+        imgs: list (nsubjects) of arrays (ntimepoints,nvertices)
+            Brain image data
+        clustering: array (nvertices) of ints
+            Parcel labels
+        n_bags: int, default 1
+            Number of bootstrap resamples in each pairwise alignment
+        method: string
+            'pca', 'ica', or 'increm_pca'
 
-
-        Returns
-        -------
-        predicted_imgs: List of 3D Niimg-like objects
-            Target subjects predicted data.
-            Each Niimg has the same length as the list test_index
-
+        RETURNS:
+        lowdim_template_rotated: array (ntimepoints,nvertices)
         """
-        if not isinstance(imgs, (list, np.ndarray)):
-            raise ValueError(
-                "The method TemplateAlignment.transform() need a list input. "
-                "Each element of the list (Niimg-like or list of Niimgs) "
-                "is the data used to align one new subject with images "
-                "indexed by train_index."
-            )
-        else:
-            if isinstance(imgs[0], (list, np.ndarray)) and len(imgs[0]) != len(
-                train_index
-            ):
-                raise ValueError(
-                    "Each element of imgs (Niimg-like or list of Niimgs) "
-                    "should have the same length as the length of train_index."
-                )
-            elif load_img(imgs[0]).shape[-1] != len(train_index):
-                raise ValueError(
-                    "Each element of imgs (Niimg-like or list of Niimgs) "
-                    "should have the same length as the length of train_index."
-                )
+        imgs_parcelwise_transformed = Parallel(n_jobs=-1,prefer='processes')(delayed(_do_dim_reduction)(imgs_one_parcel,method) for imgs_one_parcel in _yield_imgs_one_parcel(clustering,imgs)) #Step 1
+        lowdim_template = _combine_parcelwise_imgs(clustering,imgs_parcelwise_transformed,imgs[0].shape) #Step 2
 
-        template_length = self.template.shape[-1]
-        if not (
-            all(i < template_length for i in test_index)
-            and all(i < template_length for i in train_index)
-        ):
-            raise ValueError(
-                f"Template has {template_length} images but you provided a "
-                "greater index in train_index or test_index."
-            )
+        #Step 3
+        lowdim_template = lowdim_template.astype(imgs[0].dtype)
+        aligner = SurfacePairwiseAlignment(alignment_method='scaled_orthogonal',clustering=clustering,alignment_kwargs ={'scaling':True},parallel_type='processes',n_bags=n_bags,n_jobs=-1) 
+        aligner.fit( np.tile(lowdim_template,(len(imgs),1)) , np.vstack(imgs) )
+        template = zscore(aligner.transform(lowdim_template))
+        self.template = template
 
-        fitted_mappings = Parallel(self.n_jobs, prefer="threads", verbose=self.verbose)(
-            delayed(_map_template_to_image)(
-                img,
-                train_index,
-                self.template,
-                self.alignment_method,
-                self.n_pieces,
-                self.clustering,
-                self.n_bags,
-                self.masker_,
-                self.memory,
-                self.memory_level,
-                self.n_jobs,
-                self.verbose,
-            )
-            for img in imgs
-        )
+    def fit_to_template(self,imgs,n_bags=1,gamma=0):
+        """
+        Fit new imgs to pre-calculated template
+        n_bags: int, default 1
+            Number of bootstrap resamples in each pairwise alignment
+        """
+        if gamma!=0: #as a heuristic, check that the mean columnwise variance of first image and template image are similar. If not, then taking weighted average of an image and the template will not be appropriate
+            assert(0.8 < imgs[0].var(axis=0).mean() < 1.2)
+            assert(0.8 < self.template.var(axis=0).mean() < 1.2)
+        self.estimators = _align_images_to_target(imgs,self.template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,gamma) 
 
-        predicted_imgs = Parallel(self.n_jobs, prefer="threads", verbose=self.verbose)(
-            delayed(_predict_from_template_and_mapping)(
-                self.template, test_index, mapping
-            )
-            for mapping in fitted_mappings
-        )
-        return predicted_imgs
+    def transform(self,X,index):
+        #Transform data array X with subject 'index''s aligner to the template 
+        return self.estimators[index].transform(X)
+
 
     # Make inherited function harmless
     def fit_transform(self):

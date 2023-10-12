@@ -58,7 +58,17 @@ def generate_Xi_Yi(labels, X, Y, masker, verbose):
         yield X_[:, i], Y_[:, i]
 
 
-def fit_one_piece(X_i, Y_i, alignment_method):
+def fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices):
+    """
+    Fit alignment algorithm to X_i and Y_i, but only using the rows of X_i and Y_i specified by indices
+    """
+    new_algo = clone(alignment_algo)
+    new_algo.fit(X_i[indices,:],Y_i[indices,:])
+    return new_algo
+
+
+
+def fit_one_piece(X_i, Y_i, n_bags, alignment_method, alignment_kwargs, gamma):
     """Align source and target data in one piece i, X_i and Y_i, using
     alignment method and learn transformation to map X to Y.
 
@@ -68,30 +78,40 @@ def fit_one_piece(X_i, Y_i, alignment_method):
         Source data for piece i (shape : n_samples, n_features)
     Y_i: ndarray
         Target data for piece i (shape : n_samples, n_features)
+    n_bags: integer, optional (default = 1)
+        Number of bags to use for bagging. If n_bags > 1, then make n_bags bootstrap resamples of source and target image data. Each bag produces a different alignment matrix which are subsequently averaged. To make a bootstrap resample of image X, sample with replacement from the rows (nsamples) of X. In each bag, the same rows are selected for source and target images. The bagging process is done for each parcel independently.
     alignment_method: string
         Algorithm used to perform alignment between X_i and Y_i :
         - either 'identity', 'scaled_orthogonal', 'optimal_transport',
         'ridge_cv', 'permutation', 'diagonal'
         - or an instance of one of alignment classes
             (imported from functional_alignment.alignment_methods)
+    alignment_kwargs: dict
+        extra arguments passed to alignment method
+    gamma: float, optional (default = 0) range 0 to 1
+        Regularization parameter. If gamma==0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images. 
     Returns
     -------
     alignment_algo
         Instance of alignment estimator class fitted for X_i, Y_i
     """
 
+    if gamma: 
+        Y_i *= np.float16(1-gamma) #do 1 step at a time to reduce memory usage
+        Y_i += X_i*np.float16(gamma)
+
     if alignment_method == "identity":
-        alignment_algo = alignment_methods.Identity()
+        alignment_algo = alignment_methods.Identity(**alignment_kwargs)
     elif alignment_method == "scaled_orthogonal":
-        alignment_algo = alignment_methods.ScaledOrthogonalAlignment()
+        alignment_algo = alignment_methods.ScaledOrthogonalAlignment(**alignment_kwargs)
     elif alignment_method == "ridge_cv":
-        alignment_algo = alignment_methods.RidgeAlignment()
+        alignment_algo = alignment_methods.RidgeAlignment(**alignment_kwargs)
     elif alignment_method == "permutation":
-        alignment_algo = alignment_methods.Hungarian()
+        alignment_algo = alignment_methods.Hungarian(**alignment_kwargs)
     elif alignment_method == "optimal_transport":
-        alignment_algo = alignment_methods.OptimalTransportAlignment()
+        alignment_algo = alignment_methods.OptimalTransportAlignment(**alignment_kwargs)
     elif alignment_method == "diagonal":
-        alignment_algo = alignment_methods.DiagonalAlignment()
+        alignment_algo = alignment_methods.DiagonalAlignment(**alignment_kwargs)
     elif isinstance(
         alignment_method,
         (
@@ -114,7 +134,12 @@ def fit_one_piece(X_i, Y_i, alignment_method):
         warnings.warn(warn_msg)
         alignment_algo = alignment_methods.Identity()
     try:
-        alignment_algo.fit(X_i, Y_i)
+        if n_bags == 1:
+            alignment_algo.fit(X_i, Y_i)
+        else:
+            row_indices_for_each_bag = [np.random.choice(X_i.shape[0],X_i.shape[0],replace=True) for i in range(n_bags)]
+            alignment_algos_per_bag = [fit_with_resampled_rows(alignment_algo,X_i,Y_i,indices) for indices in row_indices_for_each_bag]
+            alignment_algo = alignment_methods.average_alignment_objects(alignment_algos_per_bag)
     except UnboundLocalError:
         warn_msg = (
             f"{alignment_method} is an unrecognized "

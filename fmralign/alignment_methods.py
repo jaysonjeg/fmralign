@@ -8,17 +8,43 @@ import scipy
 from joblib import Parallel, delayed
 from scipy import linalg
 from scipy.optimize import linear_sum_assignment
-from scipy.sparse import diags
+from scipy.sparse import diags, csr_matrix
 from scipy.spatial.distance import cdist
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics.pairwise import pairwise_distances
 
+def get_Wk(Xk,alpha):
+    #Get Wk from Xu et al 2012, for scaled_procrustes alignment
+    Uk, sk, Vk = linalg.svd(Xk, full_matrices=False)
+    S = 1/np.sqrt(((1-alpha)*np.square(sk)+alpha))
+    Wk = Vk.T @ np.diag(S) @ Vk
+    return Wk
 
-def scaled_procrustes(X, Y, scaling=False, primal=None):
+def average_alignment_objects(objects):
     """
-    Compute a mixing matrix R and a scaling sc such that Frobenius norm
-    ||sc RX - Y||^2 is minimized and R is an orthogonal matrix
+    Parameters
+    ----------
+    objects: list (n_bags) of alignment objects (e.g. fmralign.alignment_methods.ScaledOrthogonalAlignment)
+        Each object correponds to a separate bag. All objects correspond to the same parcel.
+    """
+    output = clone(objects[0])
+    if type(output) == ScaledOrthogonalAlignment:
+         output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+         output.scale = np.mean([i.scale for i in objects])
+    elif type(output) == Hungarian:
+        output.R = csr_matrix(np.mean(np.stack([i.R.toarray() for i in objects],axis=2),axis=2))
+    elif type(output) in [OptimalTransportAlignment,POTAlignment]:
+        output.R = np.mean(np.stack([i.R for i in objects],axis=2),axis=2)
+    elif type(output) == RidgeAlignment: #cannot use clone because R is not an array
+        objects[0].R.coef_ = np.mean(np.stack([i.R.coef_ for i in objects],axis=2),axis=2)
+        objects[0].R.intercept_ = np.mean([i.R.intercept_ for i in objects])
+        output = objects[0]
+    return output
+
+def scaled_procrustes(X, Y, scaling=False, promises_kF=0, scca_alpha=1,primal=None):
+    """Compute a mixing matrix R and a scaling sc such that Frobenius norm
+    ||sc RX - Y||^2 is minimized and R is an orthogonal matrix.
 
     Parameters
     ----------
@@ -32,6 +58,10 @@ def scaled_procrustes(X, Y, scaling=False, primal=None):
         - R is an orthogonal matrix
         - sc is a scalar
         If scaling is false sc is set to 1
+    kF: (n_features,n_features) nd array
+        from ProMises model
+    scca_alpha: float (0,1]
+        alpha parameter for SCCA model from Xu et al 2012. 0 is CCA, 1 is hyperalignment
     primal: bool or None, optional,
          Whether the SVD is done on the YX^T (primal) or Y^TX (dual)
          if None primal is used iff n_features <= n_timeframes
@@ -43,24 +73,39 @@ def scaled_procrustes(X, Y, scaling=False, primal=None):
     sc: int
         scaling parameter
     """
+    
     X = X.astype(np.float64, copy=False)
     Y = Y.astype(np.float64, copy=False)
+
+    if scca_alpha != 1:
+        assert(scca_alpha >= 0 and scca_alpha <= 1)
+        Wx = get_Wk(X,scca_alpha)
+        Wy = get_Wk(Y,scca_alpha)
+        X = X @ Wx
+        Y = Y @ Wy
+
     if np.linalg.norm(X) == 0 or np.linalg.norm(Y) == 0:
         return np.eye(X.shape[1]), 1
     if primal is None:
         primal = X.shape[0] >= X.shape[1]
     if primal:
-        A = Y.T.dot(X)
+        A = Y.T.dot(X) + (promises_kF *X.shape[0])
         if A.shape[0] == A.shape[1]:
             A += +1.0e-18 * np.eye(A.shape[0])
         U, s, V = linalg.svd(A, full_matrices=0)
         R = U.dot(V)
     else:  # "dual" mode
+        assert(promises_kF==0) #have not implemented dual mode for ProMises model yet
         Uy, sy, Vy = linalg.svd(Y, full_matrices=0)
         Ux, sx, Vx = linalg.svd(X, full_matrices=0)
         A = np.diag(sy).dot(Uy.T).dot(Ux).dot(np.diag(sx))
         U, s, V = linalg.svd(A)
         R = Vy.T.dot(U).dot(V).dot(Vx)
+
+    if scca_alpha != 1:
+        Rx = Wx @ R
+        Ry = Wy
+        R = Rx @ (Ry.T) 
 
     if scaling:
         sc = s.sum() / (np.linalg.norm(X) ** 2)
@@ -210,6 +255,10 @@ class ScaledOrthogonalAlignment(Alignment):
     -----------
     scaling : boolean, optional
         Determines whether a scaling parameter is applied to improve transform.
+    promises_kF: ndarray (n_vertices, n_vertices)
+        k * Local matrix for ProMises model, usually k*exp(-D) where D is the distance matrix
+    scca_alpha: float (0,1]
+        alpha parameter for SCCA model from Xu et al 2012. 0 is CCA, 1 is hyperalignment
 
     Attributes
     -----------
@@ -217,9 +266,12 @@ class ScaledOrthogonalAlignment(Alignment):
         Optimal orthogonal transform
     """
 
-    def __init__(self, scaling=True):
+    def __init__(self, scaling=True,promises_k=0,promises_F=0,scca_alpha=1):
         self.scaling = scaling
         self.scale = 1
+        self.promises_k = promises_k
+        self.promises_F = promises_F
+        self.scca_alpha = scca_alpha
 
     def fit(self, X, Y):
         """
@@ -232,7 +284,7 @@ class ScaledOrthogonalAlignment(Alignment):
         Y: (n_samples, n_features) nd array
             target data
         """
-        R, sc = scaled_procrustes(X, Y, scaling=self.scaling)
+        R, sc = scaled_procrustes(X, Y, scaling=self.scaling, promises_kF=self.promises_k * self.promises_F, scca_alpha=self.scca_alpha)
         self.scale = sc
         self.R = sc * R
         return self
@@ -267,7 +319,7 @@ class RidgeAlignment(Alignment):
     """
 
     def __init__(self, alphas=[0.1, 1.0, 10.0, 100, 1000], cv=4):
-        self.alphas = [alpha for alpha in alphas]
+        self.alphas = alphas #[alpha for alpha in alphas]
         self.cv = cv
 
     def fit(self, X, Y):
@@ -284,6 +336,7 @@ class RidgeAlignment(Alignment):
         self.R = RidgeCV(
             alphas=self.alphas,
             fit_intercept=True,
+            scoring="r2",
             scoring="r2",
             cv=self.cv,
         )
