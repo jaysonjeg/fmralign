@@ -337,7 +337,6 @@ class RidgeAlignment(Alignment):
             alphas=self.alphas,
             fit_intercept=True,
             scoring="r2",
-            scoring="r2",
             cv=self.cv,
         )
         self.R.fit(X, Y)

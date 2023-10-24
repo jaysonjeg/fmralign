@@ -217,7 +217,7 @@ class TemplateAlignment(BaseEstimator, TransformerMixin):
         n_bags: int, default 1
             Number of bootstrap resamples in each pairwise alignment
         """
-        if gamma!=0: #as a heuristic, check that the mean columnwise variance of first image and template image are similar. If not, then taking weighted average of an image and the template will not be appropriate
+        if (type(gamma) in [list,np.ndarray]) or (gamma!=0): #as a heuristic, check that the mean columnwise variance of first image and template image are similar. If not, then taking weighted average of an image and the template will not be appropriate
             assert(0.8 < imgs[0].var(axis=0).mean() < 1.2)
             assert(0.8 < self.template.var(axis=0).mean() < 1.2)
         self.estimators = _align_images_to_target(imgs,self.template,self.clustering,self.alignment_method,self.alignment_kwargs,self.per_parcel_kwargs,n_bags,gamma) 

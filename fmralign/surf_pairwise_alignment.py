@@ -10,7 +10,7 @@ from fmralign._utils import piecewise_transform
 from fmralign.pairwise_alignment import fit_one_piece
 import warnings
 
-def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, verbose):
+def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, gammas, verbose):
     """ Generate source and target data X_i and Y_i for each piece i.
 
     Parameters
@@ -23,6 +23,8 @@ def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, verbose):
         Target data
     per_parcel_kwargs: dict
         extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel will be added to alignment_kwargs
+    gammas: list of floats
+        List of regularization parameters, one for each parcel. If a value is 0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images.
     verbose: integer, optional.
         Indicate the level of verbosity.
 
@@ -45,13 +47,16 @@ def generate_Xi_Yi(labels, X, Y, per_parcel_kwargs, verbose):
             print("Fitting parcel: " + str(k + 1) +
                   "/" + str(len(unique_labels)))
         kwargs_kth_parcel = {key: value[k] for key, value in per_parcel_kwargs.items()} #Given a dictionary with values that are lists, return a new dictionary containing only the kth element of each value
-        
-        yield X[:, i], Y[:, i], kwargs_kth_parcel
 
-        #yield X[:,i], X[:,i]*np.float16(0.2) + Y[:,i]*np.float16(0.8), kwargs_kth_parcel
+        if type(gammas) in [list, np.ndarray]:
+            gamma = gammas[k]
+        else:
+            gamma = gammas
+            
+        yield X[:, i], Y[:, i], kwargs_kth_parcel, gamma
 
 
-def fit_parcellation(X_, Y_, alignment_method, clustering, n_bags, n_jobs, parallel_type, verbose, alignment_kwargs,per_parcel_kwargs,gamma):
+def fit_parcellation(X_, Y_, alignment_method, clustering, n_bags, n_jobs, parallel_type, verbose, alignment_kwargs,per_parcel_kwargs,gammas):
     """ Create one parcellation of n_pieces and align each source and target
     data in one piece i, X_i and Y_i, using alignment method
     and learn transformation to map X to Y.
@@ -79,8 +84,9 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_bags, n_jobs, paral
         extra arguments passed to alignment method. Dictionary of keys (argument name) and values (value, same for each parcel)
     per_parcel_kwargs: dict
         extra arguments, unique value for each parcel. Dictionary of keys (argument name) and values (list of values, one for each parcel) For each parcel, the part of per_parcel_kwargs that applies to that parcel is added to alignment_kwargs
-    gamma: float, optional (default = 0) range 0 to 1
-        Regularization parameter. If gamma==0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images. 
+    gammas: list of floats
+        List of regularization parameters, one for each parcel. If a value is 0, then no regularization is applied. Suggest values between 0.05 and 0.2. Replaces target image with a weighted average of source and target images.
+ 
     Returns
     -------
     alignment_algo
@@ -89,7 +95,7 @@ def fit_parcellation(X_, Y_, alignment_method, clustering, n_bags, n_jobs, paral
     fit = Parallel(n_jobs, prefer=parallel_type, verbose=verbose)(
         delayed(fit_one_piece)(
             X_i, Y_i, n_bags, alignment_method, dict(alignment_kwargs, **kwargs_kth_parcel), gamma
-        ) for X_i, Y_i, kwargs_kth_parcel in generate_Xi_Yi(clustering, X_, Y_, per_parcel_kwargs, verbose)
+        ) for X_i, Y_i, kwargs_kth_parcel, gamma in generate_Xi_Yi(clustering, X_, Y_, per_parcel_kwargs, gammas, verbose)
     )
     return fit
 
