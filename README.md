@@ -1,3 +1,22 @@
+# Changes in this fork
+
+To use this fork of fmralign with conda package manager:
+Clone this package into your local directory
+```
+conda create -n myenvname python=3.9
+cd fmralign
+pip install -e .
+pip install -e .[jax]
+```
+
+Changes in this fork compared to parent fmralign package:
+surf_pairwise_alignment.py takes input images as numpy arrays instead of NIFTI
+template_alignment.py modified to take input images as numpy arrays instead of NIFTI
+Added template generation methods: hyperalignment, PCA method
+Added spatial regularization (Jeganathan et al., 2024, in press)
+Added ProMises model
+Added SCCA regularization (Xu et al., 2012)
+
 # fmralign
 
 [Functional alignment for fMRI](https://parietal-inria.github.io/fmralign-docs) (functional Magnetic Resonance Imaging) data.
